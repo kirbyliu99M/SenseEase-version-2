@@ -1,0 +1,335 @@
+================================================================================
+  SENSEEASE — MAIN SCENARIO UNIFICATION & WEBCAM INTEGRATION
+  Implementation Plan
+  Date: May 8, 2026
+  Status: APPROVED FOR EXECUTION
+================================================================================
+
+
+GOALS
+-----
+1. Hide all five existing demo sub-tabs (S1–S5) from the user-facing UI.
+2. Build a single unified "Main Scenario" that fuses S1 (VIMS motion video) +
+   S5 (Progressive Habituation) on a shared video base.
+3. Add optional webcam-driven gaze tracking via Google's MediaPipe
+   FaceLandmarker, replacing the mouse-as-gaze stub.
+4. Integrate the new Main Scenario with the existing statistics dashboard
+   (VIMS + DES charts) end-to-end.
+5. Absorb Scenario 4's environment-light syncing into the Main Scenario; ditch
+   the standalone S4 panel.
+
+
+LOCKED ARCHITECTURE DECISIONS
+------------------------------
+- Single shared getUserMedia stream, opened only when user toggles
+  "Webcam Mode" ON (lazy initialization).
+  - Gaze consumer: MediaPipe FaceLandmarker (dynamic-imported on toggle).
+  - Lux consumer: prefers AmbientLightSensor API when supported & permitted,
+    falls back to canvas frame luminance sampling.
+- Chang-Hain shader (DitheringShader.js) is NOT modified. All UX smoothing
+  happens above the shader (lerp constants, gaze low-pass, calibration UI).
+  The smoothstep boundary, white anchor grid, color progression, and three-
+  zone semantics stay intact.
+- Camera is opt-in, processed on-device. Privacy claim softens accordingly;
+  default mode remains mouse + simulated circadian so the no-camera fallback
+  still works fully.
+- Calibration UX: option (c) — quick auto-flow at first webcam toggle
+  (1.5s × 3 corner dots, ~5s total) PLUS a persistent "Recalibrate Gaze"
+  button always available for booth presenters.
+
+
+================================================================================
+  PHASE 1 — UI SHELL  (~45 min, trivial)
+================================================================================
+
+SCOPE
+-----
+- index.html, lines 204–209: add style="display:none" to all 5 .demo-sub-btn
+  elements.
+- Insert new sub-tab button:
+    <button class="demo-sub-btn active" data-demo="demo-main">
+      Main Scenario
+    </button>
+- Insert new demo panel <div id="demo-main" class="demo-panel active">
+  containing:
+    - Skydiving <video> element (same source as S1)
+    - Circadian colour overlay div (ported from S4)
+    - Habituation progress bar / radius display / log (ported from S5)
+    - Webcam Mode toggle button + small live preview tile
+    - Lux readout chip ("Ambient: 240 lx", "Sensor: AmbientLightSensor"
+      or "Sensor: webcam fallback")
+    - "Recalibrate Gaze" button (visible only when webcam mode is ON)
+- Overview tab Scenario Cards:
+    - Keep the section block intact.
+    - Hide 4 of the 5 cards.
+    - Leave only the Main Scenario card; rewrite its copy to summarise the
+      unified demo experience.
+
+FEASIBILITY: Trivial. Pure DOM/CSS work. No engine code.
+
+
+================================================================================
+  PHASE 2 — ENGINE FUSION (S1 + S5)  (~2 hours, medium)
+================================================================================
+
+SCOPE
+-----
+- Add new branch in main.js setDemoTarget() function:
+    if (demoId === 'demo-main') {
+      observer.setTarget(skydivingVideo, 'video');     // S1 path
+      renderController.setTargetElement(mainWrapper);  // shader anchor
+      // Hab engine owns the radius once it starts
+    }
+- Hab engine functions (main.js lines 895–931) start on the new video's
+  'play' event, stop on 'pause'/'ended' — same triggers as S5, just
+  rewired to the new <video> element.
+- Both pre-existing engines run side-by-side:
+    Observer → InferenceEngine → drives intensity (color depth, u_intensity)
+    Hab engine → drives radius (radiusOverride)
+- ZERO algorithm changes. Data flow is orthogonal — intensity and radius
+  are independent inputs to the shader.
+
+ASSET REUSE
+-----------
+- redbull_skydiving.mp4 is already used by both S1 and S5 (per release
+  assets manifest). No new media required.
+
+FEASIBILITY: Medium. All risk is in concurrent-engine state interactions,
+but the data flow is orthogonal so no logic conflicts are expected.
+
+
+================================================================================
+  PHASE 3 — CIRCADIAN BASELINE  (~30 min, easy)
+================================================================================
+
+SCOPE
+-----
+- Port S4's overlay logic verbatim from main.js lines 756–801 into a new
+  reusable function:
+    setCircadianWarmth(warmth01)
+      — accepts a [0,1] warmth value
+      — applies the rgba() gradient overlay
+      — uses smooth 3-second lerp on receive (UX smoothing, no shader touch)
+- Default driver = the existing simulated time-lapse (so a working circadian
+  is in place before the camera lands).
+- Once the lux source attaches in Phase 5, it overrides the simulated value.
+
+FEASIBILITY: Easy.
+
+
+================================================================================
+  PHASE 4 — STATISTICS PANEL desHistory  (~45 min, easy)
+================================================================================
+
+SCOPE
+-----
+- InferenceEngine.js: add a new buffer alongside flowHistory and
+  pressureHistory:
+    this.desHistory = [];
+- In the existing 1-second setInterval (InferenceEngine.js lines 67–77),
+  push the current warmth × 100 (or "DES protection score") into desHistory.
+- Cap at 120 samples (matches existing buffer policy).
+- Update main.js updateCharts() (~line 1136+):
+    desChart.data.datasets[0].data = inferenceEngine.desHistory;
+- Add new KPI tile in the stats panel:
+    "Warm Shift Minutes" — cumulative seconds where warmth > 0.4
+
+FEASIBILITY: Easy. Existing chart infrastructure and history-buffer pattern
+are already in place.
+
+
+================================================================================
+  PHASE 5 — WEBCAM PIPELINE  (~4–6 hours, the heavy lift)
+================================================================================
+
+ARCHITECTURE
+------------
+New file: src/core/WebcamSource.js
+  Responsibility: own the single shared MediaStream.
+  Exposes:
+    start()                          → Promise<void>  (getUserMedia)
+    stop()                                            (release tracks)
+    videoElement                                      (hidden <video> srcObject)
+    onFrame(callback, intervalMs)                     (subscribe consumer)
+
+Two consumers attach via onFrame():
+
+
+PHASE 5A — GAZE TRACKER  (most complex new code)
+------------------------------------------------
+New file: src/core/GazeTracker.js
+- Dynamic import('@mediapipe/tasks-vision') triggered only when user toggles
+  webcam mode ON (lazy load avoids 3–5MB upfront cost).
+- Calibration micro-flow:
+    1. First webcam toggle automatically launches calibration.
+    2. Animated dot moves to top-left → top-right → bottom-right corners.
+    3. ~1.5 seconds per corner; user looks at the dot.
+    4. Iris vector recorded at each corner; affine map solved (2D linear
+       solve, 3 unknowns per axis).
+    5. Total ~5 seconds.
+    6. "Recalibrate Gaze" button always visible in webcam mode for repeat
+       calibrations (booth presenter use case).
+- Output: gazeX, gazeY in screen coordinates.
+- Integration: single-line patch into EyeTracker.js line 8 — replace the
+  mouse-as-gaze stub with iris-derived coordinates. Downstream
+  (RenderController._smoothedGazeX/Y, already at 0.2 lerp) provides
+  natural low-pass smoothing — no additional filter needed.
+
+
+PHASE 5B — LUX SENSOR
+---------------------
+New file: src/core/LuxSensor.js
+- Preferred path: new AmbientLightSensor({frequency: 2}) when:
+    'AmbientLightSensor' in window  AND
+    secure context (https or localhost)  AND
+    permission granted
+  Output: lux (e.g., 0–10000) → warmth value [0,1].
+- Fallback path: every 500 ms, draw the WebcamSource video frame to a
+  32×32 OffscreenCanvas, sample pixels, compute average Rec.709 luminance:
+    Y = 0.2126·R + 0.7152·G + 0.0722·B
+  Normalize → invert (bright room = cool overlay, dim room = warm overlay)
+  → warmth value [0,1].
+- Calls setCircadianWarmth(warmth) at 2 Hz.
+- Receiving end applies a 3-second smooth lerp.
+
+
+KNOWN RISKS & MITIGATIONS
+-------------------------
+- MediaPipe bundle (~3–5MB WASM):
+    Mitigation: dynamic import on toggle only; no impact on initial bundle.
+- AmbientLightSensor is Chrome-only, behind a flag on some platforms:
+    Mitigation: webcam fallback is the default; sensor is the upgrade.
+- Single getUserMedia prompt asks for camera even when only lux is needed:
+    Mitigation: one-line explainer above the toggle ("Camera enables gaze
+    + ambient light detection. All processing is on-device.").
+- Calibration accuracy degrades with glasses, dim rooms, side lighting:
+    Mitigation: mouse mode remains the primary; webcam is the "Demo
+    Calibrated Gaze" power option. Recalibrate button supports retries.
+
+FEASIBILITY: Medium-high. The MediaPipe gaze path is the most complex
+new code in the project. Everything else is glue.
+
+
+================================================================================
+  PHASE 6 — COPY SOFTENING + UX POLISH  (~1 hour, easy)
+================================================================================
+
+PRIVACY COPY EDITS
+------------------
+- Executive summary file (executive_summary_2026-05-02.txt and
+  executive_summary_2026-05-03.txt):
+    Old: "No camera required — zero privacy risk"
+    New: "Camera optional; all gaze and lux processing is performed
+         on-device. No frame data leaves the machine."
+
+- index.html, Layer 1 description (Sensing Layer):
+    Apply the same softening so the architecture overview stays consistent.
+
+- Main Scenario panel: add a single-line privacy footnote near the webcam
+  toggle:
+    "Camera frames are processed on-device only. No data leaves your
+    machine."
+
+
+UX SMOOTHING (without touching the shader)
+------------------------------------------
+- Circadian warmth lerp: ~3-second ease on receive (verify existing timing
+  constant; tune if needed).
+- Webcam gaze smoothing: inherits from RenderController._smoothedGazeX/Y
+  at 0.2 lerp factor — already in place from earlier work.
+- Habituation engine restart cool-down: 8 seconds — already in place.
+- Calibration dot animation: CSS transition + soft fade in/out.
+- Webcam mode toggle: never instantaneously swap gaze sources. Crossfade
+  over 1 second between mouse-derived and webcam-derived gazeOriginX/Y to
+  avoid jump artefacts.
+
+FEASIBILITY: Easy.
+
+
+================================================================================
+  SEQUENCING & SHIPPABLE MILESTONES
+================================================================================
+
+Each step below produces a working app. We can stop after any step and
+still have a stronger demo than today.
+
+  Step 1: Phase 1 + Phase 3
+          → Hidden tabs, Main Scenario panel with simulated circadian.
+          Risk: none.
+
+  Step 2: + Phase 2
+          → S1 motion + S5 habituation fused into the Main Scenario.
+          Risk: low.
+
+  Step 3: + Phase 4
+          → Stats panel reflects both VIMS and DES histories live.
+          Risk: low.
+
+  Step 4: + Phase 5B (AmbientLightSensor / webcam lux drives circadian)
+          → Real environment-light response in the demo.
+          Risk: medium.
+
+  Step 5: + Phase 5A (MediaPipe gaze with 3-corner calibration)
+          → Full webcam-driven gaze in the FOV mask path.
+          Risk: high (most new code in the project).
+
+  Step 6: + Phase 6
+          → Privacy copy softened across docs and UI; UX polish.
+          Risk: none.
+
+
+================================================================================
+  FILE TOUCH MANIFEST
+================================================================================
+
+EXISTING FILES MODIFIED
+-----------------------
+  index.html                       — UI shell, hide tabs, new Main panel,
+                                     scenario card filter, copy softening
+  src/main.js                      — setDemoTarget('demo-main') branch,
+                                     hab engine rewiring, circadian helper,
+                                     stats chart wiring
+  src/core/InferenceEngine.js      — desHistory buffer + 1s push
+  src/core/EyeTracker.js           — single-line swap of input source
+                                     (mouse → gaze tracker output)
+  executive_summary_2026-05-02.txt — privacy line softening
+  executive_summary_2026-05-03.txt — privacy line softening (if exists)
+
+
+NEW FILES CREATED
+-----------------
+  src/core/WebcamSource.js         — owns shared MediaStream
+  src/core/GazeTracker.js          — MediaPipe wrapper + calibration
+  src/core/LuxSensor.js            — AmbientLightSensor + webcam fallback
+
+
+FILES NOT TOUCHED
+-----------------
+  src/core/DitheringShader.js      — Chang-Hain framework preserved verbatim
+  src/core/RenderController.js     — smoothing constants already correct
+  src/core/SenseObserver.js        — flow detection unchanged
+  src/core/DataNormalizer.js       — unchanged
+  src/core/VIMSPredictor.js        — unchanged
+
+
+================================================================================
+  TIME ESTIMATE SUMMARY
+================================================================================
+
+  Phase 1   UI shell                          ~45 min
+  Phase 2   Engine fusion (S1 + S5)           ~2 hours
+  Phase 3   Circadian baseline                ~30 min
+  Phase 4   Stats panel desHistory            ~45 min
+  Phase 5A  Gaze tracker (MediaPipe)          ~3–4 hours
+  Phase 5B  Lux sensor                        ~1–2 hours
+  Phase 6   Copy softening + UX polish        ~1 hour
+  -----------------------------------------------------
+  TOTAL                                       ~9–12 hours
+
+This is a focused, single-developer estimate assuming no surprises in the
+MediaPipe integration. Add ~30% buffer for calibration tuning if needed.
+
+
+================================================================================
+  END OF PLAN
+================================================================================

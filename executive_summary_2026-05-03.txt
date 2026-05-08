@@ -1,0 +1,154 @@
+================================================================================
+  SENSEEASE - HP AI PC VISUAL COMFORT SYSTEM
+  Executive Summary
+  Date: May 3, 2026
+  ATCC Competition - Group A02
+================================================================================
+
+
+PROJECT OVERVIEW
+----------------
+SenseEase is an NPU-powered visual comfort system for HP AI PCs that performs
+real-time optical-flow interception at the rendering layer to reduce two major
+display-related risks:
+
+  - Visually Induced Motion Sickness (VIMS): sensory conflict between visual
+    motion and vestibular stillness.
+
+  - Digital Eye Strain (DES): cumulative strain from high-contrast transitions,
+    luminance instability, and prolonged flicker exposure.
+
+Product intent: provide clinically meaningful comfort improvement without
+requiring user behavior change, while preserving real-time interaction quality.
+
+
+FOUR-LAYER ENGINEERING ARCHITECTURE
+-------------------------------------
+  System Core Philosophy:
+    SenseEase is designed as an OS-level integrated visual assistance layer
+    for HP AI PCs, shifting mitigation from reactive comfort recovery to
+    high-frequency preventive intervention before symptoms escalate.
+
+  Layer 1 - Sensing & Telemetry:
+    Hardware decode telemetry, DOM scroll velocity, mouse/keyboard streams,
+    and ambient-light signals are fused into local Optical Flow Intensity
+    (OFI) estimation. HP Look to Move gaze vectors and cursor coordinates act
+    as intent proxy for foveal-zone localization. All core flow computation is
+    local-first and camera-optional, minimizing privacy and compute overhead.
+
+  Layer 2 - Inference & Pressure Computation:
+    NPU executes just-in-time pressure inference to maintain a rolling VIMS
+    Pressure Index. Efference Copy logic separates Driver Mode (active input)
+    from Passenger Mode (passive viewing), reducing active-input influence to
+    near-zero/low-weight when user intent is confirmed. A leaky integrator
+    with proportional attenuation is used to suppress mask on/off ping-pong:
+    when masking is active, effective flow is attenuated (e.g., ~20%) with a
+    small recovery bias to keep pressure evolution visually and numerically
+    stable around release thresholds.
+
+  Layer 3 - Rendering & Dynamic Intervention:
+    In real-world product form, SenseEase is positioned for Windows compositing
+    interception (DWM path) with sub-150ms response targets. In the current
+    demo build, WebGL + controller pipelines implement two intervention classes:
+    1) Extreme VIMS paths (Scenarios 1/4): absolute peripheral occlusion plus
+       Chang-Hain Stationary Anchor (screen-locked white grid) for spatial
+       reference stabilization.
+    2) High-frequency DES paths: preserve real-time update continuity while
+       applying gaze-contingent peripheral suppression, dynamic blur, and
+       temporal smoothing to non-foveal high-stimulus regions.
+
+  Layer 4 - Feedback & Progressive Habituation:
+    HP IQ serves as the AI orchestration interface for natural-language
+    discomfort feedback and long-cycle adaptation control. Complaint-triggered
+    reset returns protection toward the user's current comfort zone, while
+    Progressive Habituation expands clear-FOV exposure in micro-steps during
+    symptom-silent periods (target behavior: ~1%/sec after sustained silence,
+    e.g., 120s) under the Chang-Hain rehabilitation framework.
+
+
+WHAT HAS BEEN ACCOMPLISHED
+---------------------------
+  Product & UX Delivery:
+    - Full competition SPA implemented with Overview, Live Demos, Statistics.
+    - Presentation controls completed: Theater Mode, Auto-Demo, live dashboard.
+    - Real-time telemetry surfaced: NPU Load, Optical Flow, VIMS Pressure,
+      GPU render cost.
+
+  Engineering Reliability Milestones:
+    - Demo target routing corrected so OFI/VIMS detection stays active across
+      visible scenarios.
+    - Video lifecycle synchronization fixed (play/playing/pause/ended) to keep
+      pressure/flow updates consistent under NPU ON/OFF transitions.
+    - Adaptive intensity path hardened with:
+      1) filtered target intensity,
+      2) per-frame delta clamping,
+      3) fade hysteresis (stable fade-in/fade-out).
+    - Shader stability pass completed: deterministic peripheral opacity,
+      reduced shimmer, preserved Chang-Hain anchor behavior.
+
+  Scenario Packaging Decision:
+    - Scenario 2 code is retained for future expansion.
+    - Public demo flow is currently presented as Scenarios 1-4 for clearer
+      narrative and stronger end-to-end reliability in judging sessions.
+
+
+WHAT CAN BE SUCCESSFULLY DEMONSTRATED TODAY
+--------------------------------------------
+  1. Scenario 1 - Extreme VIMS:
+     Real-time skydiving video protection with immediate NPU interception,
+     adaptive FOV response, and stable anchor visualization.
+
+  2. Scenario 2 (current label) - Adaptive Ambient Lighting for DES:
+     Controlled focus/ambient transitions showing DES-oriented smoothing.
+
+  3. Scenario 3 (current label) - Prolonged Office Work:
+     Circadian comfort modulation with progressive visual-temperature shift.
+
+  4. Scenario 4 (current label, former Scenario 5) - Progressive Habituation:
+     Chang-Hain adaptation progression with complaint-trigger reset,
+     integrated with the same NPU protection stack as Scenario 1.
+
+  5. Statistics Dashboard:
+     Real-time side-by-side monitoring for protection effect interpretation.
+
+
+GITHUB STATUS
+-------------
+  Repository:   https://github.com/kirbyliu99M/SenseEase-version-1
+  Branch:       main
+  Commits:      12 total
+
+  Recent Commit History:
+    935dcc1  Finalize demo stability and NPU flow/pressure integration
+    b480376  Rename Demo 3 sub-tab to Adaptive Ambient Lighting Regulation
+    ed22d90  V12: Add scenario images and finalize overview content
+    2dabd11  Hide Meet the Team tab per competition requirement
+    b5d2820  Fix team photo paths
+    0a0ffe5  Update team member profiles and content
+    c8b8c4e  Refine FOV grid and mask tuning
+
+  Local Working Tree:
+    - Clean (no pending modifications).
+
+
+KNOWN GAPS / PENDING ITEMS
+---------------------------
+  - Final proofreading pass for all bilingual strings in UI copy.
+  - Optional LF/CRLF normalization (warning only; non-blocking to demo).
+  - Final stakeholder messaging pass to align clinical language and business
+    positioning in presentation script.
+
+
+OVERALL STATUS
+--------------
+  SenseEase is competition-demo ready in its current 1-4 scenario showcase
+  configuration. The NPU protection path is stable, optical flow and VIMS
+  pressure telemetry are wired through active demos, and Progressive
+  Habituation remains functionally integrated with Chang-Hain logic.
+
+  This build is suitable for live judging, with remaining work concentrated on
+  copy polish rather than core engineering risk.
+
+================================================================================
+  End of Executive Summary - SenseEase - Group A02 - 2026-05-03
+================================================================================
