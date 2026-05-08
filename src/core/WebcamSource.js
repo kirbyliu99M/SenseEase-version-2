@@ -30,11 +30,29 @@ export class WebcamSource {
       try { await this._previewElement.play(); } catch { /* autoplay policy: silent */ }
     }
 
+    // Must append to DOM for Chrome to reliably decode frames for MediaPipe!
+    // Using opacity 0 to maintain the requested privacy.
     this.videoElement = document.createElement('video');
     this.videoElement.muted = true;
     this.videoElement.playsInline = true;
+    this.videoElement.style.position = 'fixed';
+    this.videoElement.style.top = '0';
+    this.videoElement.style.left = '0';
+    this.videoElement.style.zIndex = '-9999';
+    // Chrome will freeze frame decoding if opacity is exactly 0 or display is none.
+    // 0.01 forces the browser compositor to process the video frames.
+    this.videoElement.style.opacity = '0.01';
+    this.videoElement.style.pointerEvents = 'none';
+    this.videoElement.style.width = '320px';
+    this.videoElement.style.height = '240px';
     this.videoElement.srcObject = this.stream;
-    try { await this.videoElement.play(); } catch { /* silent */ }
+    document.body.appendChild(this.videoElement);
+    
+    // Wait for the video metadata to load so dimensions are available
+    await new Promise((resolve) => {
+      this.videoElement.onloadedmetadata = resolve;
+      try { this.videoElement.play(); } catch { resolve(); }
+    });
 
     this._startLoop();
     return this.stream;
@@ -50,6 +68,7 @@ export class WebcamSource {
     }
 
     if (this.videoElement) {
+      if (this.videoElement.parentNode) this.videoElement.parentNode.removeChild(this.videoElement);
       this.videoElement.srcObject = null;
       this.videoElement = null;
     }

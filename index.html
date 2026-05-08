@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SenseEase - HP AI PC Visual Comfort System</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="/vendor/tailwind/tailwindcss-cdn.js"></script>
+  <script src="/vendor/chartjs/chart.umd.min.js"></script>
   <script>
     tailwind.config = {
       theme: { extend: { colors: { primary: '#024AD8', 'primary-light': '#E2ECFF', alert: '#E54747' } } }
@@ -179,7 +179,6 @@
               <p class="text-black text-sm opacity-60 mt-1">Three protection layers running concurrently: FOV restriction with Chang-Hain anchor grid (VIMS), progressive habituation expanding the clear field as you adapt, and ambient-light-driven circadian colour shifting (DES). Toggle Webcam Mode for on-device gaze + lux sensing.</p>
             </div>
             <div class="flex flex-col items-end gap-2">
-              <div id="main-circadian-badge" class="bg-[#024AD8] text-white text-xs font-bold px-3 py-1.5 rounded-full self-start">Morning</div>
               <div id="main-lux-chip" class="bg-white border border-[#024AD8] text-[#024AD8] text-[11px] font-bold px-2.5 py-1 rounded-full">Ambient: simulated</div>
             </div>
           </div>
@@ -188,15 +187,13 @@
           <div class="flex items-center gap-3 mb-3 flex-wrap">
             <button id="main-webcam-toggle" class="demo-toggle-btn text-xs py-1.5 px-4">Enable Webcam Mode</button>
             <button id="main-recalibrate-btn" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Recalibrate Gaze</button>
+            <button id="main-debug-toggle" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Hide Debug</button>
             <span class="text-[11px] text-black opacity-50 leading-tight">Camera frames are processed on-device only. No data leaves your machine.</span>
-            <video id="main-webcam-preview" muted playsinline autoplay
-                   style="display:none;width:80px;height:60px;border-radius:6px;border:1px solid #024AD8;object-fit:cover;margin-left:auto;"></video>
           </div>
 
           <!-- Video container with circadian overlay layered on top -->
           <div class="video-container" id="main-wrapper" style="position:relative;">
             <video id="main-video" src="https://github.com/kirbyliu99M/SenseEase-version-1/releases/download/v1.0/redbull_skydiving.mp4" loop controls></video>
-            <div id="main-circadian-overlay" class="circadian-overlay"></div>
             <div id="main-play-overlay" class="video-play-overlay">
               <div class="video-play-btn">
                 <svg id="main-icon-play" viewBox="0 0 24 24" width="48" height="48"><polygon points="6,3 20,12 6,21" fill="white"/></svg>
@@ -205,18 +202,11 @@
             </div>
           </div>
 
-          <!-- Circadian Progress Bar -->
-          <div class="mt-4">
-            <div class="flex justify-between text-xs text-black opacity-50 mb-1">
-              <span>Cool 6500K</span><span>Neutral 5000K</span><span>Warm 3500K</span><span>Amber 2700K</span>
-            </div>
-            <div class="w-full h-2 bg-[#E2ECFF] rounded-full overflow-hidden">
-              <div id="main-circadian-progress" class="h-full rounded-full transition-all duration-500" style="width:0%; background: linear-gradient(to right, #87CEEB, #FFD700, #FF8C00, #FF4500);"></div>
-            </div>
-          </div>
-
           <!-- Habituation: Neural Adaptation Progress -->
           <div class="mt-5">
+            <div class="mb-3">
+              <button id="btn-start-hab" class="demo-toggle-btn text-xs py-1.5 px-4">▶ Start Neural Adaptation</button>
+            </div>
             <div class="flex justify-between text-xs text-black opacity-60 mb-1">
               <span class="font-bold">Neural Adaptation Progress (Chang-Hain)</span>
               <span id="main-hab-radius">Clear FOV: 15%</span>
@@ -629,6 +619,10 @@ observer.subscribe((flow, intent) => {
   </section>
 
 </main>
+
+<div id="gaze-indicator" style="display:none; position:fixed; width:30px; height:30px; border:3px solid #E54747; border-radius:8px; pointer-events:none; z-index:99999; transform:translate(-50%, -50%); box-shadow: 0 0 8px rgba(229,71,71,0.6); transition: opacity 0.2s;">
+  <div style="position:absolute; top:50%; left:50%; width:4px; height:4px; background:#E54747; border-radius:50%; transform:translate(-50%, -50%);"></div>
+</div>
 
 <script type="module" src="/src/main.js"></script>
 </body>

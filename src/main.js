@@ -1,4 +1,4 @@
-import './style.css'
+﻿import './style.css'
 import { SenseObserver }    from './core/SenseObserver.js'
 import { RenderController } from './core/RenderController.js'
 import { ChatbotUI }        from './components/ChatbotUI.js'
@@ -11,7 +11,7 @@ import { WebcamSource }     from './core/WebcamSource.js'
 import { LuxSensor }        from './core/LuxSensor.js'
 import { GazeTracker }      from './core/GazeTracker.js'
 
-// ── V4 Four-Layer Architecture ──────────────────────────
+// ?? V4 Four-Layer Architecture ??????????????????????????
 const eyeTracker     = new EyeTracker();
 const dataNormalizer = new DataNormalizer();
 const vimsPredictor  = new VIMSPredictor();
@@ -34,7 +34,7 @@ chatbotUI.onComplain   = () => inferenceEngine.handleUserComplaint();
 chatbotUI.onWeaken     = () => renderController.relaxMask(15); // Rebound with Scenario 5-aware handler below.
 chatbotUI.isTheaterMode = () => isTheaterMode;
 
-// ── Open HP IQ Feedback button ───────────────────────────
+// ?? Open HP IQ Feedback button ???????????????????????????
 const btnOpenChatbot = document.getElementById('btn-open-chatbot');
 if (btnOpenChatbot) btnOpenChatbot.addEventListener('click', () => chatbotUI.open());
 
@@ -44,6 +44,8 @@ console.assert(!!elDashPressure, '[MainLoop] Missing #dash-pressure DOM node.');
 if (!elDashPressure) console.error('[MainLoop] #dash-pressure not found; VIMS UI cannot render.');
 console.assert(!!elDashPressure || !!elVimsPressureValue, '[MainLoop] No pressure DOM target found.');
 
+const gazeIndicator = document.getElementById('gaze-indicator');
+
 function runGlobalMainLoop() {
   const pressure = inferenceEngine.getPressure();
   if (Number.isNaN(pressure)) {
@@ -52,12 +54,32 @@ function runGlobalMainLoop() {
   const pressureText = (Number.isFinite(pressure) ? pressure : 0).toFixed(2);
   if (elDashPressure) elDashPressure.innerText = pressureText;
   if (elVimsPressureValue) elVimsPressureValue.innerText = pressureText;
+
+  // Auto Demo Mode Badge sync
+  const badge = document.getElementById('auto-demo-badge');
+  if (inferenceEngine.autoDemoMode && badge) {
+    const active = inferenceEngine.isMaskActive;
+    badge.innerText = active ? 'NPU Intercept: Active' : 'NPU Intercept: Standby';
+    badge.style.background = active ? '#024AD8' : '#E54747';
+  }
+
+  // Gaze Indicator sync
+  if (gazeIndicator) {
+    if (eyeTracker.gazeOverride && document.getElementById('demo-main')?.classList.contains('active')) {
+      gazeIndicator.style.display = 'block';
+      gazeIndicator.style.left = `${eyeTracker.gazeOverride.x}px`;
+      gazeIndicator.style.top = `${eyeTracker.gazeOverride.y}px`;
+    } else {
+      gazeIndicator.style.display = 'none';
+    }
+  }
+
   requestAnimationFrame(runGlobalMainLoop);
 }
 requestAnimationFrame(runGlobalMainLoop);
 
 // ======================================================
-// SPA Routing — 3 Main Tabs
+// SPA Routing ??3 Main Tabs
 // ======================================================
 const mainTabs = document.querySelectorAll('#main-tabs .tab-btn');
 const sections = document.querySelectorAll('.spa-section');
@@ -134,27 +156,15 @@ btnAuto.addEventListener('click', () => {
   if (inferenceEngine.autoDemoMode) { hardwareInterrupt(); return; }
 
   inferenceEngine.autoDemoMode = true;
+  inferenceEngine.setProtectionEnabled(true);
+  inferenceEngine.setGlobalOverride(false); // Let the predictor handle it
+  
   btnAuto.classList.add('active');
   btnManual.classList.remove('active');
-  btnManual.innerText = 'NPU Protection: Auto';
+  btnManual.innerText = 'NPU Protection: OFF';
   badge.classList.add('show');
-
-  let isOn = false;
   badge.innerText = 'NPU Intercept: Standby';
   badge.style.background = '#E54747';
-
-  autoDemoTimer = setInterval(() => {
-    const demosTabActive = document.getElementById('tab-demos')?.classList.contains('active');
-    if (!demosTabActive) return;
-    isOn = !isOn;
-    inferenceEngine.setProtectionEnabled(isOn);
-    inferenceEngine.setGlobalOverride(isOn);
-    badge.innerText        = isOn ? 'NPU Intercept: Active'   : 'NPU Intercept: Disabled';
-    badge.style.background = isOn ? '#024AD8' : '#E54747';
-    if (!isOn) hoveredStockIdx = null;
-    if (typeof syncScenario2Schedulers === 'function') syncScenario2Schedulers();
-    if (typeof updateWatchlistContrast === 'function') updateWatchlistContrast();
-  }, 5000);
 });
 
 // ======================================================
@@ -208,7 +218,7 @@ if (videoPlayOverlay && video) {
 }
 
 // ======================================================
-// Universal Theater Mode (navbar ⛶ Theater button)
+// Universal Theater Mode (navbar ??Theater button)
 // ======================================================
 const btnTheater     = document.getElementById('btn-theater-mode');
 const cinemaBackdrop = document.getElementById('cinema-backdrop');
@@ -224,6 +234,7 @@ function getTheaterTarget() {
     'demo-scen3': 'demo-scen3',
     'demo-scen4': 'office-wrapper',
     'demo-scen5': 'habituation-wrapper',
+    'demo-main': 'main-wrapper',
   };
   const id = map[activeBtn.dataset.demo];
   return id ? document.getElementById(id) : null;
@@ -234,23 +245,46 @@ function enterTheater() {
   if (!theaterTarget) return;
   theaterTarget.classList.add('theater-fullscreen');
   if (cinemaBackdrop) cinemaBackdrop.classList.add('active');
-  if (btnTheater) { btnTheater.innerText = '✕ Exit Theater'; btnTheater.classList.add('active'); }
+  if (btnTheater) { btnTheater.innerText = 'Exit Theater'; btnTheater.classList.add('active'); }
   isTheaterMode = true;
   window.dispatchEvent(new Event('resize'));
+  refreshTheaterGazeBinding();
 }
 function exitTheater() {
   if (theaterTarget) theaterTarget.classList.remove('theater-fullscreen');
   if (cinemaBackdrop) cinemaBackdrop.classList.remove('active');
-  if (btnTheater) { btnTheater.innerText = '⛶ Theater'; btnTheater.classList.remove('active'); }
+  if (btnTheater) { btnTheater.innerText = 'Theater'; btnTheater.classList.remove('active'); }
   isTheaterMode = false;
   theaterTarget = null;
   window.dispatchEvent(new Event('resize'));
+  refreshTheaterGazeBinding();
+}
+
+
+function refreshTheaterGazeBinding() {
+  const activeDemo = document.querySelector('#demo-sub-tabs .demo-sub-btn.active')?.dataset.demo;
+  if (activeDemo) {
+    setTimeout(() => setDemoTarget(activeDemo), 60);
+    setTimeout(() => setDemoTarget(activeDemo), 180);
+  }
+
+  if (webcamMode && gazeTracker) {
+    setTimeout(async () => {
+      try {
+        await gazeTracker.calibrate({ profile: 'quick', preCenterMs: 1000 });
+        gazeLastError = '';
+      } catch (e) {
+        gazeLastError = formatBootError(e);
+      }
+      _updateGazeDebugPanel();
+    }, 200);
+  }
 }
 
 if (btnTheater)      btnTheater.addEventListener('click', () => isTheaterMode ? exitTheater() : enterTheater());
 if (cinemaBackdrop)  cinemaBackdrop.addEventListener('click', exitTheater);
 
-// Demo 2 is gaze-contingent — disable circular FOV overlay when on Demo 2
+// Demo 2 is gaze-contingent ??disable circular FOV overlay when on Demo 2
 function setDemoTarget(demoId) {
   renderController.radiusOverride = null;
   if (demoId === 'demo-scen1') {
@@ -460,7 +494,7 @@ function buildOrderBook() {
   }
   asksEl.innerHTML = aH;
   bidsEl.innerHTML = bH;
-  if (midEl) midEl.innerText = `${price.toFixed(2)}  ·  spread ${(price * 0.0008).toFixed(3)}`;
+  if (midEl) midEl.innerText = `${price.toFixed(2)}  繚  spread ${(price * 0.0008).toFixed(3)}`;
 }
 
 function tickPrices() {
@@ -474,13 +508,13 @@ function tickPrices() {
     const chEl  = document.getElementById(`wl-chg-${i}`);
     if (prEl) {
       prEl.innerText = s.price.toFixed(2);
-      // Color-only tick feedback — CSS transition handles smoothness, zero layout paint
+      // Color-only tick feedback ??CSS transition handles smoothness, zero layout paint
       prEl.style.color = isUp ? '#ff6b6b' : '#4ade80';
       clearTimeout(prEl._t);
       prEl._t = setTimeout(() => { prEl.style.color = ''; }, 420);
     }
     if (chEl) {
-      chEl.innerText = `${pct >= 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(2)}%`;
+      chEl.innerText = `${pct >= 0 ? '+' : '-'} ${Math.abs(pct).toFixed(2)}%`;
       chEl.className = `wl-chg ${pct >= 0 ? 'tick-up' : 'tick-down'}`;
     }
     if (i === klineFocusIdx) {
@@ -496,7 +530,7 @@ function tickPrices() {
       const ksEl = document.getElementById('kline-symbol');
       const tot  = (s.price - BASE_PRICES[i]) / BASE_PRICES[i] * 100;
       if (kpEl) kpEl.innerText = s.price.toFixed(2);
-      if (kcEl) { kcEl.innerText = `${tot >= 0 ? '▲' : '▼'} ${Math.abs(tot).toFixed(2)}%`; kcEl.className = `kline-chg ${tot >= 0 ? 'tick-up' : 'tick-down'}`; }
+      if (kcEl) { kcEl.innerText = `${tot >= 0 ? '+' : '-'} ${Math.abs(tot).toFixed(2)}%`; kcEl.className = `kline-chg ${tot >= 0 ? 'tick-up' : 'tick-down'}`; }
       if (ksEl) ksEl.innerText = s.sym;
     }
   });
@@ -515,7 +549,7 @@ if (watchlistEl) {
   if (klineCanvas) new ResizeObserver(() => { klineDirty = true; }).observe(klineCanvas.parentElement);
 
   // Architectural note: K-line canvas renders only when data changes (dirty flag).
-  // Decouples canvas paint from the setInterval tick — smooth 60fps, zero wasted GPU cycles.
+  // Decouples canvas paint from the setInterval tick ??smooth 60fps, zero wasted GPU cycles.
   (function klineRenderLoop() {
     if (klineDirty) { drawKLine(); klineDirty = false; }
     requestAnimationFrame(klineRenderLoop);
@@ -654,7 +688,7 @@ if (watchlistEl) {
 }
 
 // ======================================================
-// Scenario 3: DES — Window Switch + Ambient Light
+// Scenario 3: DES ??Window Switch + Ambient Light
 // ======================================================
 const btnFocus     = document.getElementById('btn-focus-switch');
 const btnNormal    = document.getElementById('btn-normal-room');
@@ -730,8 +764,8 @@ function initAmbientSensor() {
     webcamStream = null;
     clearInterval(webcamSampleInterval);
     webcamSampleInterval = null;
-    if (ambientLuxEl) ambientLuxEl.innerText = '—';
-    if (btnWebcamSensing) { btnWebcamSensing.innerText = '💡 Webcam Sensing'; btnWebcamSensing.classList.remove('active'); }
+    if (ambientLuxEl) ambientLuxEl.innerText = '--';
+    if (btnWebcamSensing) { btnWebcamSensing.innerText = 'Webcam Sensing'; btnWebcamSensing.classList.remove('active'); }
     if (desContainer) desContainer.style.filter = '';
     return;
   }
@@ -744,7 +778,7 @@ function initAmbientSensor() {
       const offCanvas = document.createElement('canvas');
       offCanvas.width = offCanvas.height = 32;
       const ctx = offCanvas.getContext('2d');
-      if (btnWebcamSensing) { btnWebcamSensing.innerText = '🔴 Sensing...'; btnWebcamSensing.classList.add('active'); }
+      if (btnWebcamSensing) { btnWebcamSensing.innerText = '? Sensing...'; btnWebcamSensing.classList.add('active'); }
       webcamSampleInterval = setInterval(() => {
         ctx.drawImage(camVideo, 0, 0, 32, 32);
         const data = ctx.getImageData(0, 0, 32, 32).data;
@@ -770,7 +804,7 @@ function initAmbientSensor() {
 if (btnWebcamSensing) btnWebcamSensing.addEventListener('click', initAmbientSensor);
 
 // ======================================================
-// Scenario 4: Prolonged Office Work — Circadian + Flicker
+// Scenario 4: Prolonged Office Work ??Circadian + Flicker
 // ======================================================
 const officeVideo        = document.getElementById('office-video');
 const officePlayOverlay  = document.getElementById('office-play-overlay');
@@ -790,11 +824,11 @@ function syncOfficeUI() {
   if (flickerOverlay)  flickerOverlay.style.opacity  = playing ? '1' : '0';
 }
 
-// setCircadianWarmth(warmth01) — single source of truth for circadian visuals.
+// setCircadianWarmth(warmth01) ??single source of truth for circadian visuals.
 // Writes to BOTH the legacy S4 panel (#circadian-overlay/badge/progress, #office-video)
 // AND the new Main Scenario panel (#main-circadian-*, #main-video). Hidden panel's
-// writes are inert — keeps the rendering pipeline scenario-agnostic.
-// Live circadian state — read by stats panel for DES-protection detection.
+// writes are inert ??keeps the rendering pipeline scenario-agnostic.
+// Live circadian state ??read by stats panel for DES-protection detection.
 let currentWarmth = 0;
 
 function setCircadianWarmth(warmth01) {
@@ -802,23 +836,25 @@ function setCircadianWarmth(warmth01) {
   currentWarmth = warmth01;
 
   let label;
-  if      (warmth01 < 0.15) label = '🌅 Morning';
-  else if (warmth01 < 0.45) label = '☀️ Afternoon';
-  else if (warmth01 < 0.75) label = '🌇 Evening';
-  else                      label = '🌙 Night';
+  if      (warmth01 < 0.15) label = '?? Morning';
+  else if (warmth01 < 0.45) label = '?儭?Afternoon';
+  else if (warmth01 < 0.75) label = '?? Evening';
+  else                      label = '?? Night';
 
-  // Overlay: transparent morning → warm amber-red night
+  // Overlay: transparent morning ??warm amber-red night
   const r = 255;
-  const g = Math.round(220 - warmth01 * 130);  // 220 → 90
-  const b = Math.round(100 - warmth01 * 80);   // 100 → 20
-  const alpha   = (warmth01 * 0.18).toFixed(3);
+  const g = Math.round(220 - warmth01 * 130);  // 220 ??90
+  const b = Math.round(100 - warmth01 * 80);   // 100 ??20
+  const alpha   = (warmth01 * 0.10).toFixed(3);
   const bg      = `rgba(${r},${g},${b},${alpha})`;
   const opacity = String(Math.min(warmth01 * 0.95, 0.95));
   const widthStr = (warmth01 * 100).toFixed(1) + '%';
 
-  const sepia  = (warmth01 * 0.3).toFixed(3);
-  const hueRot = Math.round(warmth01 * -14);
-  const filter = `sepia(${sepia}) hue-rotate(${hueRot}deg)`;
+  const sepia  = (warmth01 * 0.15).toFixed(3);
+  const hueRot = Math.round(warmth01 * -7);
+  const brightness = (1 - warmth01 * 0.1).toFixed(3);
+  const contrast = (1 - warmth01 * 0.05).toFixed(3);
+  const filter = `sepia(${sepia}) hue-rotate(${hueRot}deg) brightness(${brightness}) contrast(${contrast})`;
 
   function _apply(overlayId, badgeId, progressId, videoId) {
     const overlay = document.getElementById(overlayId);
@@ -836,8 +872,7 @@ function setCircadianWarmth(warmth01) {
 
   // Legacy S4 binding
   _apply('circadian-overlay', 'circadian-badge', 'circadian-progress', 'office-video');
-  // Main Scenario binding
-  _apply('main-circadian-overlay', 'main-circadian-badge', 'main-circadian-progress', 'main-video');
+  // Main Scenario binding removed per user request
 
   // Night-sharpness text enhancement when sufficiently dark
   const scen4Panel = document.getElementById('demo-scen4');
@@ -846,24 +881,26 @@ function setCircadianWarmth(warmth01) {
   if (mainPanel)  mainPanel.classList.toggle('night-sharp', warmth01 > 0.65);
 }
 
-// Legacy wrapper — S4 video-time-driven circadian (linear progress 0→1 → logistic warmth)
+// Legacy wrapper ??S4 video-time-driven circadian (linear progress 0?? ??logistic warmth)
 function updateCircadian(progress) {
   const warmth = 1 / (1 + Math.exp(-10 * (progress - 0.5)));
   setCircadianWarmth(warmth);
 }
 
-// Main Scenario circadian timeline — simulated 60-second cool→warm→cool loop.
+// Main Scenario circadian timeline ??simulated 60-second cool?arm?ool loop.
 // Drives setCircadianWarmth at RAF cadence. Replaced by real lux input in Phase 5.
 const MAIN_CIRCADIAN_DURATION_MS = 60000;
 let mainCircadianStart = null;
 let mainCircadianRaf   = null;
 
 function startMainCircadianTimeline() {
+  // Disabled per user request (Visual tone time demonstration disabled)
+  return;
   if (mainCircadianRaf) return;
   mainCircadianStart = performance.now();
   function loop() {
     const elapsed  = performance.now() - mainCircadianStart;
-    // Triangle wave 0→1→0 over (2 × duration) so it cycles cool→warm→cool
+    // Triangle wave 0???? over (2 ? duration) so it cycles cool?arm?ool
     const t        = (elapsed % (2 * MAIN_CIRCADIAN_DURATION_MS)) / MAIN_CIRCADIAN_DURATION_MS;
     const progress = t <= 1 ? t : 2 - t;
     const warmth   = 1 / (1 + Math.exp(-10 * (progress - 0.5)));
@@ -991,9 +1028,9 @@ function startHabEngine() {
   if (Date.now() < habCoolingUntil) return;
   if (habRafId) return;
   renderController.setNpuState(true);
-  setHabStatus('Training ▶', '#00e676');
-  habLog(`Engine started — FOV radius: ${habRadius.toFixed(1)}%`);
-  const increment = (HAB_MAX - HAB_MIN) * 0.00005; // ~0.005% of range per frame (~3–4 min full range)
+  setHabStatus('Training', '#00e676');
+  habLog(`Engine started ??FOV radius: ${habRadius.toFixed(1)}%`);
+  const increment = (HAB_MAX - HAB_MIN) * 0.00005; // ~0.005% of range per frame (~3?? min full range)
   function habLoop() {
     if (!habPenalized) {
       habRadius = Math.min(HAB_MAX, habRadius + increment);
@@ -1023,24 +1060,24 @@ function stopHabEngine() {
   clearTimeout(habWeakenTO);
   habCoolingUntil = 0;
   habFrameCount = 0;
-  setHabStatus('Paused ⏸', '#60a5fa');
+  setHabStatus('Paused', '#60a5fa');
 }
 
 function habComplaintPenalty() {
-  // Force-stop the rAF loop immediately — no background expansion during penalty
+  // Force-stop the rAF loop immediately ??no background expansion during penalty
   cancelHabLoop();
   habFrameCount = 0;
   habRadius     = Math.max(HAB_MIN, habRadius - 15);
   habResets++;
   habPenalized  = true;
-  habLog(`⚠ Adaptation Reset — FOV shrunk to ${habRadius.toFixed(1)}%. Engine locked 8s.`);
-  setHabStatus('Locked ⛔', '#E54747');
+  habLog(`??Adaptation Reset ??FOV shrunk to ${habRadius.toFixed(1)}%. Engine locked 8s.`);
+  setHabStatus('Locked', '#E54747');
   updateHabUI();
   clearTimeout(habPenaltyTO);
   // Restart engine after penalty window ONLY if the active demo video is still playing
   habPenaltyTO = setTimeout(() => {
     habPenalized = false;
-    habLog('Penalty window ended — resuming expansion.');
+    habLog('Penalty window ended ??resuming expansion.');
     if (_isActiveDemoVideoPlaying()) startHabEngine();
   }, 8000);
 }
@@ -1058,7 +1095,7 @@ function habWeakenProtection() {
 
   habWeakenTO = setTimeout(() => {
     habPenalized = false;
-    habLog('Cooldown ended — resuming gradual expansion.');
+    habLog('Cooldown ended ??resuming gradual expansion.');
     if (_isActiveDemoVideoPlaying()) startHabEngine();
   }, 5000);
 }
@@ -1078,28 +1115,7 @@ if (habVideo) {
     observer.setTarget(habVideo, 'video');
     observer.setVideoState(true);
     renderController.setTargetElement(document.getElementById('habituation-wrapper'));
-    inferenceEngine.setGlobalOverride(true);
-
-    // Smooth entry: ease from 100 → habRadius over ~3 seconds (180 frames)
-    const entryFrom   = 100;
-    const entryTarget = habRadius;
-    const entryFrames = 180;
-    let   entryF      = 0;
-    renderController.radiusOverride = entryFrom;
-
-    function entryLoop() {
-      entryF++;
-      const t     = Math.min(entryF / entryFrames, 1);
-      const eased = 1 - Math.pow(1 - t, 2); // ease-out quad
-      renderController.radiusOverride = entryFrom - (entryFrom - entryTarget) * eased;
-      if (t < 1) {
-        requestAnimationFrame(entryLoop);
-      } else {
-        renderController.radiusOverride = entryTarget;
-        startHabEngine();
-      }
-    }
-    requestAnimationFrame(entryLoop);
+    // Entry loop removed, wait for user to explicitly start habituation
   });
   habVideo.addEventListener('playing', () => {
     syncHabUI();
@@ -1157,7 +1173,7 @@ chatbotUI.onWeaken = () => {
 };
 
 // ======================================================
-// Main Scenario engine — unified VIMS (FOV mask) + Habituation + Circadian DES.
+// Main Scenario engine ??unified VIMS (FOV mask) + Habituation + Circadian DES.
 // Reuses the hab engine (startHabEngine, habRadius, habComplaintPenalty etc.)
 // declared above. Adds its own video event listeners and the simulated
 // circadian timeline driver (real lux input arrives in Phase 5).
@@ -1191,31 +1207,60 @@ if (mainVideo) {
     observer.setTarget(mainVideo, 'video');
     observer.setVideoState(true);
     renderController.setTargetElement(mainWrapper);
-    inferenceEngine.setGlobalOverride(true);
-    // Simulated circadian only when webcam mode is off — lux sensor owns warmth otherwise.
+    // Simulated circadian only when webcam mode is off ??lux sensor owns warmth otherwise.
     if (!webcamMode) startMainCircadianTimeline();
 
-    // Smooth radius entry: ease from full-clear (100) → habRadius over ~3s
-    const entryFrom   = 100;
-    const entryTarget = habRadius;
-    const entryFrames = 180;
-    let   entryF      = 0;
-    renderController.radiusOverride = entryFrom;
-
-    function entryLoop() {
-      entryF++;
-      const t     = Math.min(entryF / entryFrames, 1);
-      const eased = 1 - Math.pow(1 - t, 2);
-      renderController.radiusOverride = entryFrom - (entryFrom - entryTarget) * eased;
-      if (t < 1) {
-        requestAnimationFrame(entryLoop);
-      } else {
-        renderController.radiusOverride = entryTarget;
-        startHabEngine();
-      }
-    }
-    requestAnimationFrame(entryLoop);
+    // Removed entryLoop and startHabEngine, user must manually click Start Neural Adaptation
   });
+
+  const btnStartHab = document.getElementById('btn-start-hab');
+  if (btnStartHab) {
+    let entryRafId = null; // Track entry animation
+
+    btnStartHab.addEventListener('click', () => {
+      // If running (or animating in), stop it
+      if (habRafId || entryRafId) {
+        if (entryRafId) {
+          cancelAnimationFrame(entryRafId);
+          entryRafId = null;
+        }
+        stopHabEngine();
+        inferenceEngine.setGlobalOverride(false);
+        renderController.radiusOverride = null;
+        btnStartHab.innerText = '??Start Neural Adaptation';
+        btnStartHab.classList.remove('active');
+        return;
+      }
+
+      // Otherwise, start it
+      btnStartHab.innerText = '??Stop Neural Adaptation';
+      btnStartHab.classList.add('active');
+      if (mainVideo.paused || mainVideo.ended) mainVideo.play();
+      
+      inferenceEngine.setGlobalOverride(true);
+      // Smooth radius entry: ease from full-clear (100) ??habRadius over ~3s
+      const entryFrom   = 100;
+      const entryTarget = habRadius;
+      const entryFrames = 180;
+      let   entryF      = 0;
+      renderController.radiusOverride = entryFrom;
+
+      function entryLoop() {
+        entryF++;
+        const t     = Math.min(entryF / entryFrames, 1);
+        const eased = 1 - Math.pow(1 - t, 2);
+        renderController.radiusOverride = entryFrom - (entryFrom - entryTarget) * eased;
+        if (t < 1) {
+          entryRafId = requestAnimationFrame(entryLoop);
+        } else {
+          entryRafId = null;
+          renderController.radiusOverride = entryTarget;
+          startHabEngine();
+        }
+      }
+      entryRafId = requestAnimationFrame(entryLoop);
+    });
+  }
 
   mainVideo.addEventListener('playing', () => {
     syncMainUI();
@@ -1258,17 +1303,78 @@ if (mainPlayOverlay && mainVideo) {
   });
 }
 
-// ----- Webcam Mode: shared MediaStream + LuxSensor + GazeTracker (Phase 5) ---
+// ----- Webcam Mode: shared MediaStream + LuxSensor + MediaPipe GazeTracker ---
 const webcamSource = new WebcamSource();
 let webcamMode = false;
 let luxSensor = null;
 let gazeTracker = null;
+let gazeLastError = '';
 let gazeCalibrated = false;
 const luxChip = document.getElementById('main-lux-chip');
 const webcamToggleBtn = document.getElementById('main-webcam-toggle');
-const recalibrateBtn  = document.getElementById('main-recalibrate-btn');
+const recalibrateBtn = document.getElementById('main-recalibrate-btn');
+const debugToggleBtn = document.getElementById('main-debug-toggle');
+let gazeDebugPanel = null;
+let gazeDebugVisible = false;
 
 function setLuxChip(text) { if (luxChip) luxChip.innerText = text; }
+
+function formatBootError(err) {
+  if (!err) return 'unknown error';
+  if (typeof err === 'string') return err;
+  if (err instanceof Error) return err.message || String(err);
+  if (err instanceof Event) {
+    const src = err?.target?.src || err?.currentTarget?.src || 'unknown src';
+    return `Event error (${src})`;
+  }
+  try { return JSON.stringify(err); } catch { return String(err); }
+}
+
+function setRecalibrateButtonState({ enabled = true, busy = false } = {}) {
+  if (!recalibrateBtn) return;
+  if (!enabled) {
+    recalibrateBtn.style.display = 'none';
+    return;
+  }
+  recalibrateBtn.style.display = '';
+  recalibrateBtn.disabled = !!busy;
+  recalibrateBtn.innerText = busy ? 'Quick center lock + calibrating...' : 'Recalibrate (Quick center)';
+}
+
+function setDebugButtonState({ enabled = false } = {}) {
+  if (!debugToggleBtn) return;
+  debugToggleBtn.style.display = enabled ? '' : 'none';
+  debugToggleBtn.innerText = gazeDebugVisible ? 'Hide Debug' : 'Show Debug';
+  debugToggleBtn.classList.toggle('active', gazeDebugVisible);
+}
+
+function createGazeTracker() {
+  const onGaze = (gx, gy, meta = {}) => {
+    eyeTracker.setGazeSample(gx, gy, {
+      quality: meta.quality,
+      ts: meta.ts,
+      source: meta.source || 'mediapipe',
+    });
+  };
+  return new GazeTracker(webcamSource, onGaze);
+}
+
+async function startMediaPipeGaze() {
+  eyeTracker.setActiveBackend('mediapipe');
+  const tracker = createGazeTracker();
+  await tracker.start();
+
+  let calibrationError = '';
+  if (!gazeCalibrated) {
+    try {
+      await tracker.calibrate({ profile: 'quick', preCenterMs: 1600 });
+      gazeCalibrated = true;
+    } catch (e) {
+      calibrationError = formatBootError(e);
+    }
+  }
+  return { tracker, calibrationError };
+}
 
 // Refresh the lux chip text every second (shows source + latest reading).
 setInterval(() => {
@@ -1283,7 +1389,17 @@ setInterval(() => {
 
 async function enableWebcamMode() {
   if (webcamMode) return;
-  if (webcamToggleBtn) { webcamToggleBtn.disabled = true; webcamToggleBtn.innerText = 'Requesting Camera…'; }
+  if (webcamToggleBtn) { webcamToggleBtn.disabled = true; webcamToggleBtn.innerText = 'Requesting Camera...'; }
+
+  const isLocalHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if (!window.isSecureContext && !isLocalHost) {
+    setLuxChip('Ambient: insecure context (use https/localhost)');
+    if (webcamToggleBtn) {
+      webcamToggleBtn.disabled = false;
+      webcamToggleBtn.innerText = 'Enable Webcam Mode';
+    }
+    return;
+  }
 
   try {
     await webcamSource.start();
@@ -1298,35 +1414,37 @@ async function enableWebcamMode() {
   }
 
   webcamMode = true;
+  eyeTracker.disableMouse = true;
+  eyeTracker.clearGazeSample();
+  gazeLastError = '';
 
-  // Lux sensor takes over circadian warmth — pause the simulated timeline.
+  // Lux sensor takes over circadian warmth ??pause the simulated timeline.
   stopMainCircadianTimeline();
 
   luxSensor = new LuxSensor(webcamSource, (warmth) => setCircadianWarmth(warmth));
   await luxSensor.start();
   setLuxChip(`Ambient: ${luxSensor.sourceLabel}`);
 
-  // Start the MediaPipe gaze tracker. Lazy-loads ~3-5MB on first use.
-  gazeTracker = new GazeTracker(webcamSource, (gx, gy) => {
-    eyeTracker.gazeOverride = { x: gx, y: gy };
-  });
   try {
-    await gazeTracker.start();
-    if (recalibrateBtn) recalibrateBtn.style.display = '';
-    if (!gazeCalibrated) {
-      // Auto-calibrate on first webcam enable.
-      try {
-        await gazeTracker.calibrate();
-        gazeCalibrated = true;
-      } catch (calErr) {
-        console.warn('[Main] Gaze calibration failed:', calErr?.message || calErr);
-        // Leave gaze inactive; user can hit Recalibrate to retry.
-      }
+    const started = await startMediaPipeGaze();
+    gazeTracker = started.tracker;
+    gazeLastError = started.calibrationError || '';
+    if (gazeLastError) {
+      console.warn('[Main] Gaze tracker active with calibration warning:', gazeLastError);
+    } else {
+      console.info('[Main] Gaze tracker backend active: mediapipe');
     }
   } catch (e) {
-    console.warn('[Main] Gaze tracker init failed (likely network/CDN):', e?.message || e);
     gazeTracker = null;
+    gazeLastError = formatBootError(e);
+    eyeTracker.clearGazeSample();
+    console.warn('[Main] mediapipe gaze backend failed:', gazeLastError);
   }
+
+  _ensureGazeDebugPanel();
+  _updateGazeDebugPanel();
+  setRecalibrateButtonState({ enabled: !!gazeTracker, busy: false });
+  setDebugButtonState({ enabled: true });
 
   if (webcamToggleBtn) {
     webcamToggleBtn.disabled = false;
@@ -1338,9 +1456,12 @@ async function enableWebcamMode() {
 function disableWebcamMode() {
   if (!webcamMode) return;
   webcamMode = false;
+  eyeTracker.disableMouse = false;
 
   if (gazeTracker) { gazeTracker.stop(); gazeTracker = null; }
-  eyeTracker.gazeOverride = null;          // restore mouse-driven gaze
+  gazeLastError = '';
+  eyeTracker.setActiveBackend('none');
+  eyeTracker.clearGazeSample();
   if (luxSensor) { luxSensor.stop(); luxSensor = null; }
   webcamSource.stop();
 
@@ -1350,7 +1471,9 @@ function disableWebcamMode() {
   }
 
   setLuxChip('Ambient: simulated');
-  if (recalibrateBtn) recalibrateBtn.style.display = 'none';
+  _removeGazeDebugPanel();
+  setRecalibrateButtonState({ enabled: false });
+  setDebugButtonState({ enabled: false });
   if (webcamToggleBtn) {
     webcamToggleBtn.innerText = 'Enable Webcam Mode';
     webcamToggleBtn.classList.remove('active');
@@ -1360,16 +1483,17 @@ function disableWebcamMode() {
 if (recalibrateBtn) {
   recalibrateBtn.addEventListener('click', async () => {
     if (!gazeTracker || !webcamMode) return;
-    recalibrateBtn.disabled = true;
-    recalibrateBtn.innerText = 'Calibrating…';
+    setRecalibrateButtonState({ enabled: true, busy: true });
     try {
-      await gazeTracker.calibrate();
+      await gazeTracker.calibrate({ profile: 'quick', preCenterMs: 1600 });
       gazeCalibrated = true;
+      gazeLastError = '';
     } catch (e) {
-      console.warn('[Main] Recalibration failed:', e?.message || e);
+      gazeLastError = formatBootError(e);
+      console.warn('[Main] Recalibration failed:', gazeLastError);
     }
-    recalibrateBtn.disabled = false;
-    recalibrateBtn.innerText = 'Recalibrate Gaze';
+    _updateGazeDebugPanel();
+    setRecalibrateButtonState({ enabled: true, busy: false });
   });
 }
 
@@ -1379,8 +1503,80 @@ if (webcamToggleBtn) {
   });
 }
 
+if (debugToggleBtn) {
+  debugToggleBtn.addEventListener('click', () => {
+    gazeDebugVisible = !gazeDebugVisible;
+    if (gazeDebugPanel) gazeDebugPanel.style.display = gazeDebugVisible ? 'block' : 'none';
+    setDebugButtonState({ enabled: webcamMode });
+  });
+}
+
+function _ensureGazeDebugPanel() {
+  if (gazeDebugPanel) return;
+  const panel = document.createElement('div');
+  panel.id = 'gaze-debug-panel';
+  Object.assign(panel.style, {
+    position: 'fixed',
+    right: '12px',
+    bottom: '12px',
+    zIndex: '100001',
+    minWidth: '230px',
+    maxWidth: '320px',
+    background: 'rgba(8, 12, 24, 0.86)',
+    color: '#dbeafe',
+    border: '1px solid rgba(148,163,184,0.35)',
+    borderRadius: '10px',
+    padding: '10px 12px',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: '11px',
+    lineHeight: '1.45',
+    pointerEvents: 'none',
+    whiteSpace: 'pre-line',
+  });
+  document.body.appendChild(panel);
+  gazeDebugPanel = panel;
+  gazeDebugPanel.style.display = gazeDebugVisible ? 'block' : 'none';
+}
+
+function _removeGazeDebugPanel() {
+  if (!gazeDebugPanel) return;
+  gazeDebugPanel.remove();
+  gazeDebugPanel = null;
+}
+
+function _updateGazeDebugPanel() {
+  if (!gazeDebugPanel || !webcamMode) return;
+  const d = eyeTracker.getDiagnostics ? eyeTracker.getDiagnostics() : null;
+  const tDiag = gazeTracker?.getDiagnostics ? gazeTracker.getDiagnostics() : null;
+  const trackerLoad = tDiag?.loadState || (gazeTracker ? 'n/a' : 'none');
+  const mappingMode = tDiag?.mappingMode || 'n/a';
+  const c = tDiag?.calibration;
+  const calText = c
+    ? `${c.grade || 'n/a'} (rmse ${Number.isFinite(c.rmsePx) ? c.rmsePx.toFixed(0) : 'inf'}px, n=${c.samples ?? 0}, ${c.passed ? 'pass' : 'fail'})`
+    : 'none';
+
+  gazeDebugPanel.textContent = [
+    '[Gaze Debug]',
+    'backend: mediapipe',
+    `tracker: ${gazeTracker ? 'active' : 'none'}`,
+    `load: ${trackerLoad}`,
+    `mapping: ${mappingMode}`,
+    `mode: ${d?.mode || 'n/a'}`,
+    `quality: ${Number.isFinite(d?.quality) ? d.quality.toFixed(2) : 'n/a'}`,
+    `fps: ${Number.isFinite(d?.sampleHz) ? d.sampleHz.toFixed(1) : 'n/a'}`,
+    `stale: ${Number.isFinite(d?.staleMs) ? `${d.staleMs.toFixed(0)}ms` : 'n/a'}`,
+    `zone: ${Number.isFinite(d?.zone) ? d.zone : 'n/a'}`,
+    `rej jumps: ${d?.rejectedJumps ?? 0}`,
+    `calibration: ${calText}`,
+  ].join('\n');
+}
+
+setInterval(() => {
+  if (webcamMode) _updateGazeDebugPanel();
+}, 250);
+
 // ======================================================
-// Statistics Dashboard — Chart.js charts
+// Statistics Dashboard ??Chart.js charts
 // ======================================================
 let vimsChartProtected = null;
 let vimsChartBaseline = null;
@@ -1453,7 +1649,7 @@ function initCharts() {
   });
 }
 
-function updateCharts() {
+function updateStatsData() {
   // Update session summary metrics
   const flow     = inferenceEngine.observer.opticalFlow;
   const pressure = inferenceEngine.pressure;
@@ -1462,6 +1658,34 @@ function updateCharts() {
   const maskNow = inferenceEngine.isMaskActive || inferenceEngine.isGlobalOverrideOn;
   if (maskNow && !statWasMaskActive) statIntercepts++;
   statWasMaskActive = maskNow;
+
+  // DES protection is active when:
+  const desOn = currentWarmth > 0.4
+    || document.querySelector('.des-container.bright-room, .des-container.dark-room') !== null
+    || renderController.npuActive;
+  desFatigueRaw += 1;
+  desFatigue    += desOn ? 0.3 : 1;
+  if (currentWarmth > 0.4) warmShiftSeconds += 1;
+
+  const rawFlow = inferenceEngine.observer.opticalFlow;
+  const weight = inferenceEngine.passiveFlowWeight * 0.05;
+  if (rawFlow < inferenceEngine.noiseGateThreshold) {
+    baselinePressure = Math.max(0, baselinePressure * 0.965);
+  } else {
+    baselinePressure = Math.max(0, (baselinePressure * 0.98) + (rawFlow * weight));
+  }
+
+  baselineFlowHistory.push(parseFloat(rawFlow.toFixed(1)));
+  baselinePressureHistory.push(parseFloat(baselinePressure.toFixed(1)));
+  if (baselineFlowHistory.length > 120) baselineFlowHistory.shift();
+  if (baselinePressureHistory.length > 120) baselinePressureHistory.shift();
+
+  desProtectionHistory.push({ raw: desFatigueRaw, prot: desFatigue });
+  if (desProtectionHistory.length > 120) desProtectionHistory.shift();
+}
+
+function updateCharts() {
+  if (!vimsChartProtected || !vimsChartBaseline || !desChart) return;
 
   const uptime = Math.floor((Date.now() - statsSessionStart) / 1000);
   const uptimeStr = uptime >= 60 ? `${Math.floor(uptime/60)}m ${uptime%60}s` : `${uptime}s`;
@@ -1484,27 +1708,9 @@ function updateCharts() {
       : `${warmShiftSeconds}s`;
   }
 
-  if (!vimsChartProtected || !vimsChartBaseline || !desChart) return;
-
-  // DES protection is active when:
-  //   1. Legacy S3 panel is in adaptive lighting mode (.bright-room/.dark-room), OR
-  //   2. Main Scenario circadian warmth > 0.4 (warm shift engaged), OR
-  //   3. NPU mask is active (peripheral occlusion attenuates flicker exposure too)
-  const desOn = currentWarmth > 0.4
-    || document.querySelector('.des-container.bright-room, .des-container.dark-room') !== null
-    || renderController.npuActive;
-  desFatigueRaw += 1;
-  desFatigue    += desOn ? 0.3 : 1;
-  if (currentWarmth > 0.4) warmShiftSeconds += 1;
-
   const rawFlow = inferenceEngine.observer.opticalFlow;
-  const weight = inferenceEngine.passiveFlowWeight * 0.05;
-  if (rawFlow < inferenceEngine.noiseGateThreshold) {
-    baselinePressure = Math.max(0, baselinePressure * 0.965);
-  } else {
-    baselinePressure = Math.max(0, (baselinePressure * 0.98) + (rawFlow * weight));
-  }
-
+  const pressure = inferenceEngine.pressure;
+  
   if (elLiveProtectedFlow) elLiveProtectedFlow.innerText = inferenceEngine.flowHistory.length
     ? inferenceEngine.flowHistory[inferenceEngine.flowHistory.length - 1].toFixed(1)
     : '0.0';
@@ -1513,10 +1719,6 @@ function updateCharts() {
   if (elLiveBaselinePressure) elLiveBaselinePressure.innerText = baselinePressure.toFixed(1);
 
   const labels = inferenceEngine.timeHistory.map(t => `${t}s`);
-  baselineFlowHistory.push(parseFloat(rawFlow.toFixed(1)));
-  baselinePressureHistory.push(parseFloat(baselinePressure.toFixed(1)));
-  if (baselineFlowHistory.length > 120) baselineFlowHistory.shift();
-  if (baselinePressureHistory.length > 120) baselinePressureHistory.shift();
 
   vimsChartProtected.data.labels = labels;
   vimsChartProtected.data.datasets[0].data = inferenceEngine.flowHistory;
@@ -1529,9 +1731,6 @@ function updateCharts() {
   vimsChartBaseline.update('none');
 
   // DES chart: rolling window matching timeHistory length
-  const len = inferenceEngine.timeHistory.length;
-  desProtectionHistory.push({ raw: desFatigueRaw, prot: desFatigue });
-  if (desProtectionHistory.length > 120) desProtectionHistory.shift();
   desChart.data.labels              = inferenceEngine.timeHistory.map(t => `${t}s`);
   desChart.data.datasets[0].data    = desProtectionHistory.map(d => d.raw);
   desChart.data.datasets[1].data    = desProtectionHistory.map(d => d.prot);
@@ -1549,7 +1748,10 @@ document.getElementById('tab-stats') && (() => {
   }
 })();
 
-// Update charts every second
+// Data collection runs every second regardless of tab
 setInterval(() => {
+  updateStatsData();
   if (chartsInited) updateCharts();
 }, 1000);
+
+

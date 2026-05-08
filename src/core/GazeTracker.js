@@ -1,23 +1,11 @@
-// GazeTracker — Google MediaPipe FaceLandmarker (with iris) → screen-space gaze coords.
-// MediaPipe is lazy-loaded from CDN on the first call to start() so it doesn't
-// inflate the initial bundle (the WASM + JS package is ~3-5MB).
-//
-// Calibration: 3 corner dots (top-left, top-right, bottom-right). User looks at
-// each in turn while we sample iris position. We then solve a 2D affine
-// transform from iris-space to screen-space (3 corresponding points → 6
-// unknowns → exactly determined system).
-//
-// All processing is on-device. The MediaPipe WASM module performs face
-// landmark detection locally; no frame data leaves the machine.
+import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 
-const MEDIAPIPE_VERSION = '0.10.16';
-const MEDIAPIPE_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/vision_bundle.mjs`;
-const MEDIAPIPE_WASM_BASE  = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`;
-const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const BASE_URL = import.meta.env.BASE_URL || '/';
+const VENDOR_BASE = `${BASE_URL}vendor/mediapipe`;
+const MEDIAPIPE_WASM_BASE = `${VENDOR_BASE}/tasks-vision/wasm`;
+const MODEL_URL = `${VENDOR_BASE}/models/face_landmarker.task`;
 
-// Iris landmark indices in MediaPipe FaceLandmarker (refined landmarks output).
-// Left iris: 468-472 (centre 468), Right iris: 473-477 (centre 473).
-const LEFT_IRIS_CENTRE  = 468;
+const LEFT_IRIS_CENTRE = 468;
 const RIGHT_IRIS_CENTRE = 473;
 
 export class GazeTracker {
@@ -26,44 +14,100 @@ export class GazeTracker {
     this.onGaze = onGaze;
     this.faceLandmarker = null;
     this._unsubFrame = null;
-    this._affine = null;       // 2x3 matrix [[ax, bx, cx], [ay, by, cy]] applied to iris (x, y)
     this._calibrating = false;
     this._lastFrameMs = 0;
     this._calibrationOverlay = null;
     this._isReady = false;
+    this._mapping = null;
+    this._lastCalibration = null;
+    this._loadState = 'idle';
+    this._lastError = '';
+    this._fallbackCenter = { x: 0, y: 0, ready: false };
+    this._fallbackAmp = { x: 0.09, y: 0.07 };
   }
 
   async _ensureMediaPipe() {
     if (this.faceLandmarker) return;
-    const { FaceLandmarker, FilesetResolver } = await import(/* @vite-ignore */ MEDIAPIPE_BUNDLE_URL);
-    const wasmFileset = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_BASE);
-    this.faceLandmarker = await FaceLandmarker.createFromOptions(wasmFileset, {
-      baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
-      outputFaceBlendshapes: false,
-      outputFacialTransformationMatrixes: false,
-      runningMode: 'VIDEO',
-      numFaces: 1,
-    });
+    this._loadState = 'loading';
+    this._lastError = '';
+    try {
+      const wasmFileset = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_BASE);
+      this.faceLandmarker = await FaceLandmarker.createFromOptions(wasmFileset, {
+        baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: false,
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        minFaceDetectionConfidence: 0.65,
+        minFacePresenceConfidence: 0.65,
+        minTrackingConfidence: 0.65,
+      });
+      this._loadState = 'ready';
+    } catch (e) {
+      this._loadState = 'error';
+      this._lastError = e?.message || String(e);
+      throw e;
+    }
   }
 
-  // Sample iris position once. Returns {x, y} in normalized image coords or null.
   _sampleIris(video) {
     if (!this.faceLandmarker || !video || video.videoWidth === 0) return null;
+
     const ts = performance.now();
-    if (ts - this._lastFrameMs < 30) return null; // throttle to ~30Hz
+    if (ts - this._lastFrameMs < 28) return null;
     this._lastFrameMs = ts;
 
     const result = this.faceLandmarker.detectForVideo(video, ts);
     if (!result?.faceLandmarks?.[0]) return null;
 
-    const lm = result.faceLandmarks[0];
-    if (lm.length < RIGHT_IRIS_CENTRE + 1) return null; // iris not in this model output
+    if (result.faceBlendshapes?.[0]) {
+      const shapes = result.faceBlendshapes[0].categories;
+      const getScore = (name) => {
+        const s = shapes.find((c) => c.categoryName === name);
+        return s ? s.score : 0;
+      };
 
-    const left  = lm[LEFT_IRIS_CENTRE];
-    const right = lm[RIGHT_IRIS_CENTRE];
+      const lOut = getScore('eyeLookOutLeft');
+      const lIn = getScore('eyeLookInLeft');
+      const rOut = getScore('eyeLookOutRight');
+      const rIn = getScore('eyeLookInRight');
+      const gazeX = ((rOut - rIn) + (lIn - lOut)) / 2.0;
+
+      const lUp = getScore('eyeLookUpLeft');
+      const lDn = getScore('eyeLookDownLeft');
+      const rUp = getScore('eyeLookUpRight');
+      const rDn = getScore('eyeLookDownRight');
+      const gazeY = ((lDn - lUp) + (rDn - rUp)) / 2.0;
+
+      const blink = Math.max(getScore('eyeBlinkLeft'), getScore('eyeBlinkRight'));
+      const lookMagnitude = Math.hypot(gazeX, gazeY);
+      const quality = _clamp((1 - blink * 0.9) + Math.min(0.16, lookMagnitude * 0.35), 0.08, 1.0);
+
+      return { x: gazeX, y: gazeY, quality };
+    }
+
+    const lm = result.faceLandmarks[0];
+    if (lm.length < RIGHT_IRIS_CENTRE + 1) return null;
+
+    const lIris = lm[LEFT_IRIS_CENTRE];
+    const rIris = lm[RIGHT_IRIS_CENTRE];
+    const lInner = lm[133];
+    const rInner = lm[362];
+
+    const faceCenter = {
+      x: (lInner.x + rInner.x) / 2,
+      y: (lInner.y + rInner.y) / 2,
+    };
+    const iod = Math.hypot(lInner.x - rInner.x, lInner.y - rInner.y) || 0.001;
+    const avgIris = {
+      x: (lIris.x + rIris.x) / 2,
+      y: (lIris.y + rIris.y) / 2,
+    };
+
     return {
-      x: (left.x + right.x) / 2,
-      y: (left.y + right.y) / 2,
+      x: (avgIris.x - faceCenter.x) / iod,
+      y: (avgIris.y - faceCenter.y) / iod,
+      quality: 0.55,
     };
   }
 
@@ -72,120 +116,225 @@ export class GazeTracker {
     await this._ensureMediaPipe();
     this._isReady = true;
 
-    // Live inference loop — emits gaze coords through onGaze() at ~30Hz.
     this._unsubFrame = this.webcam.onFrame((video) => {
-      if (this._calibrating) return;       // pause emission during calibration
-      if (!this._affine) return;            // waiting for first calibration
-      const iris = this._sampleIris(video);
-      if (!iris) return;
-      const screen = this._applyAffine(iris);
-      this.onGaze(screen.x, screen.y);
-    }, 33);
+      if (this._calibrating) return;
+
+      const sample = this._sampleIris(video);
+      if (!sample) return;
+
+      const screen = this._applyMapping(sample);
+      if (!screen) return;
+
+      this.onGaze(screen.x, screen.y, {
+        quality: this._mapping ? sample.quality : Math.max(0.18, sample.quality * 0.82),
+        source: 'mediapipe',
+        ts: performance.now(),
+      });
+    }, 24);
   }
 
   stop() {
-    if (this._unsubFrame) { this._unsubFrame(); this._unsubFrame = null; }
+    if (this._unsubFrame) {
+      this._unsubFrame();
+      this._unsubFrame = null;
+    }
+
     if (this.faceLandmarker) {
       try { this.faceLandmarker.close(); } catch {}
       this.faceLandmarker = null;
     }
+
     this._isReady = false;
-    this._affine = null;
+    this._mapping = null;
     this._dismissCalibrationOverlay();
   }
 
-  // 3-corner calibration — TL, TR, BR. ~1.5s per corner.
-  async calibrate({ dwellMs = 1500, sampleCount = 30 } = {}) {
+  async calibrate({
+    profile = 'quick',          // quick | full
+    dwellMs = 700,
+    sampleCount = 10,
+    preCenterMs = 2200,
+  } = {}) {
     if (!this._isReady) await this.start();
     this._calibrating = true;
 
-    const corners = [
-      { name: 'TL', sx: 0,                  sy: 0                   },
-      { name: 'TR', sx: window.innerWidth,  sy: 0                   },
-      { name: 'BR', sx: window.innerWidth,  sy: window.innerHeight  },
-    ];
+    const positions = _buildCalibrationGrid(window.innerWidth, window.innerHeight);
+    const samples = [];
 
-    const samplesByCorner = [];
     this._showCalibrationOverlay();
+    const preCenter = await this._collectCenterBaseline(preCenterMs);
+    if (!preCenter) {
+      this._dismissCalibrationOverlay();
+      this._calibrating = false;
+      throw new Error('Pre-calibration failed: keep looking at center in stable lighting');
+    }
 
-    for (const c of corners) {
-      this._moveCalibrationDot(c.sx, c.sy, c.name);
-      // Wait an initial 400ms for eye to settle on the dot
-      await _sleep(400);
-
-      // Sample iris over the dwell window
-      const samples = [];
-      const sampleInterval = Math.max(20, Math.floor((dwellMs - 400) / sampleCount));
-      const start = performance.now();
-      while (performance.now() - start < (dwellMs - 400)) {
-        const iris = this._sampleIris(this.webcam.videoElement);
-        if (iris) samples.push(iris);
-        await _sleep(sampleInterval);
-      }
-
-      if (samples.length === 0) {
+    if (profile !== 'full') {
+      const quickMapping = _buildQuickMappingFromBaseline(
+        preCenter,
+        window.innerWidth,
+        window.innerHeight,
+      );
+      if (!quickMapping) {
         this._dismissCalibrationOverlay();
         this._calibrating = false;
-        throw new Error(`Calibration failed at ${c.name}: no face/iris detected`);
+        throw new Error('Quick calibration failed: baseline mapping solve failed');
+      }
+      this._dismissCalibrationOverlay();
+      this._calibrating = false;
+      this._mapping = quickMapping;
+      this._lastCalibration = {
+        passed: true,
+        grade: 'quick',
+        mode: 'quick',
+        rmsePx: NaN,
+        samples: preCenter.samples,
+      };
+      return true;
+    }
+
+    for (let i = 0; i < positions.length; i += 1) {
+      const p = positions[i];
+      this._moveCalibrationDot(p.sx, p.sy, `Point ${i + 1}/${positions.length}`);
+      await _sleep(260);
+
+      const gazeSamples = [];
+      const interval = Math.max(18, Math.floor((dwellMs - 260) / sampleCount));
+      const start = performance.now();
+
+      while (performance.now() - start < (dwellMs - 260)) {
+        const s = this._sampleIris(this.webcam.videoElement);
+        if (s && s.quality >= 0.14) gazeSamples.push(s);
+        await _sleep(interval);
       }
 
+      if (gazeSamples.length < Math.max(4, Math.floor(sampleCount * 0.22))) continue;
+
       const avg = {
-        x: samples.reduce((s, p) => s + p.x, 0) / samples.length,
-        y: samples.reduce((s, p) => s + p.y, 0) / samples.length,
+        x: gazeSamples.reduce((acc, v) => acc + v.x, 0) / gazeSamples.length,
+        y: gazeSamples.reduce((acc, v) => acc + v.y, 0) / gazeSamples.length,
       };
-      samplesByCorner.push({ ...avg, sx: c.sx, sy: c.sy });
+      samples.push({ ...avg, sx: p.sx, sy: p.sy });
     }
 
     this._dismissCalibrationOverlay();
     this._calibrating = false;
 
-    // Solve 2D affine: iris (px, py) → screen (sx, sy)
-    this._affine = solveAffine3pt(
-      samplesByCorner[0], samplesByCorner[1], samplesByCorner[2]
-    );
+    const mapping = _fitQuadraticMapping(samples, 0.0025);
+    if (!mapping) throw new Error('Calibration failed: insufficient valid points');
+
+    const report = await this._validateCalibration(mapping);
+    if (!report.passed) {
+      const rmseFinite = Number.isFinite(report.rmsePx);
+      const weakButUsable = rmseFinite && report.rmsePx <= 360;
+      if (!weakButUsable) {
+        this._lastCalibration = report;
+        throw new Error(`Calibration quality too low (${report.rmsePx.toFixed(0)}px RMSE). Please retry in better lighting.`);
+      }
+      report.grade = 'weak';
+      report.warning = `Using weak calibration (${report.rmsePx.toFixed(0)}px RMSE)`;
+    }
+
+    this._mapping = mapping;
+    this._lastCalibration = { ...report, mode: 'full' };
     return true;
   }
 
-  _applyAffine(iris) {
-    const A = this._affine;
+  getDiagnostics() {
     return {
-      x: A[0][0] * iris.x + A[0][1] * iris.y + A[0][2],
-      y: A[1][0] * iris.x + A[1][1] * iris.y + A[1][2],
+      backend: 'mediapipe',
+      calibration: this._lastCalibration,
+      loadState: this._loadState,
+      lastError: this._lastError,
+      mappingMode: this._mapping ? 'calibrated' : 'fallback',
     };
   }
 
-  // ----- Calibration overlay (dom-only, no canvas) -----
+  _applyMapping(sample) {
+    if (!this._mapping) return this._applyFallbackMapping(sample);
+
+    const f = _basis(sample.x, sample.y);
+    const x = _dot(this._mapping.wx, f);
+    const y = _dot(this._mapping.wy, f);
+
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+
+    return {
+      x: _clamp(x, -window.innerWidth * 0.25, window.innerWidth * 1.25),
+      y: _clamp(y, -window.innerHeight * 0.25, window.innerHeight * 1.25),
+    };
+  }
+
+  _applyFallbackMapping(sample) {
+    if (!this._fallbackCenter.ready) {
+      this._fallbackCenter = { x: sample.x, y: sample.y, ready: true };
+      return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    }
+
+    const cx = this._fallbackCenter.x;
+    const cy = this._fallbackCenter.y;
+    const dx = sample.x - cx;
+    const dy = sample.y - cy;
+    const motion = Math.hypot(dx, dy);
+
+    const centerAlpha = motion < 0.035 ? 0.052 : 0.009;
+    this._fallbackCenter.x = _lerp(this._fallbackCenter.x, sample.x, centerAlpha);
+    this._fallbackCenter.y = _lerp(this._fallbackCenter.y, sample.y, centerAlpha);
+
+    this._fallbackAmp.x = _clamp(_lerp(this._fallbackAmp.x, Math.abs(dx), 0.04), 0.03, 0.28);
+    this._fallbackAmp.y = _clamp(_lerp(this._fallbackAmp.y, Math.abs(dy), 0.04), 0.025, 0.24);
+
+    const nx = _clamp(dx / Math.max(0.05, this._fallbackAmp.x * 2.05), -1, 1);
+    const ny = _clamp(dy / Math.max(0.045, this._fallbackAmp.y * 2.05), -1, 1);
+
+    const sx = window.innerWidth * (0.5 + nx * 0.46);
+    const sy = window.innerHeight * (0.5 + ny * 0.41);
+    return {
+      x: _clamp(sx, 0, window.innerWidth),
+      y: _clamp(sy, 0, window.innerHeight),
+    };
+  }
+
   _showCalibrationOverlay() {
     if (this._calibrationOverlay) return;
+
     const o = document.createElement('div');
     o.id = 'gaze-calibration-overlay';
     Object.assign(o.style, {
-      position: 'fixed', inset: '0', zIndex: '99999',
-      background: 'rgba(8, 12, 24, 0.92)', color: '#fff',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontFamily: 'system-ui, sans-serif', pointerEvents: 'none',
+      position: 'fixed',
+      inset: '0',
+      zIndex: '99999',
+      background: 'rgba(8, 12, 24, 0.92)',
+      color: '#fff',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontFamily: 'system-ui, sans-serif',
+      pointerEvents: 'none',
     });
+
     o.innerHTML = `
-      <div style="text-align:center;max-width:480px;padding:32px;">
+      <div style="text-align:center;max-width:560px;padding:32px;">
         <div style="font-size:14px;letter-spacing:0.18em;text-transform:uppercase;opacity:0.7;margin-bottom:12px;">SenseEase Gaze Calibration</div>
-        <div style="font-size:22px;font-weight:600;margin-bottom:6px;">Look at the dot — keep your head still.</div>
-        <div id="gaze-calib-status" style="font-size:13px;opacity:0.6;">Initializing…</div>
+        <div style="font-size:21px;font-weight:600;margin-bottom:6px;">Look at the dot and hold your gaze steady.</div>
+        <div id="gaze-calib-status" style="font-size:13px;opacity:0.65;">Initializing...</div>
       </div>
-      <div id="gaze-calib-dot" style="position:absolute;width:32px;height:32px;border-radius:50%;background:#3aa6ff;box-shadow:0 0 24px 8px rgba(58,166,255,0.55);transform:translate(-50%,-50%);left:50%;top:50%;transition:left 0.4s ease, top 0.4s ease;"></div>
+      <div id="gaze-calib-dot" style="position:absolute;width:30px;height:30px;border-radius:50%;background:#3aa6ff;box-shadow:0 0 24px 8px rgba(58,166,255,0.55);transform:translate(-50%,-50%);left:50%;top:50%;transition:left 0.32s ease, top 0.32s ease;"></div>
     `;
+
     document.body.appendChild(o);
     this._calibrationOverlay = o;
   }
 
-  _moveCalibrationDot(x, y, label) {
+  _moveCalibrationDot(x, y, statusLabel) {
     if (!this._calibrationOverlay) return;
     const dot = this._calibrationOverlay.querySelector('#gaze-calib-dot');
     const status = this._calibrationOverlay.querySelector('#gaze-calib-status');
     if (dot) {
       dot.style.left = `${x}px`;
-      dot.style.top  = `${y}px`;
+      dot.style.top = `${y}px`;
     }
-    if (status) status.innerText = `Sampling ${label}…`;
+    if (status) status.innerText = `Sampling ${statusLabel}`;
   }
 
   _dismissCalibrationOverlay() {
@@ -194,44 +343,225 @@ export class GazeTracker {
       this._calibrationOverlay = null;
     }
   }
+
+  async _collectCenterBaseline(preCenterMs) {
+    const sx = window.innerWidth * 0.5;
+    const sy = window.innerHeight * 0.5;
+    this._moveCalibrationDot(sx, sy, 'Center lock');
+    await _sleep(220);
+
+    const windowMs = Math.max(1800, preCenterMs | 0);
+    const sampleStep = 26;
+    const samples = [];
+    const t0 = performance.now();
+
+    while (performance.now() - t0 < windowMs) {
+      const remain = Math.max(0, windowMs - (performance.now() - t0));
+      this._moveCalibrationDot(sx, sy, `Center lock ${Math.ceil(remain / 1000)}s`);
+      const s = this._sampleIris(this.webcam.videoElement);
+      if (s && s.quality >= 0.14) samples.push(s);
+      await _sleep(sampleStep);
+    }
+
+    if (samples.length < Math.max(18, Math.floor(windowMs / 200))) return null;
+
+    const cx = samples.reduce((acc, v) => acc + v.x, 0) / samples.length;
+    const cy = samples.reduce((acc, v) => acc + v.y, 0) / samples.length;
+    const ax = samples.reduce((acc, v) => acc + Math.abs(v.x - cx), 0) / samples.length;
+    const ay = samples.reduce((acc, v) => acc + Math.abs(v.y - cy), 0) / samples.length;
+
+    // Establish a stable fallback anchor before multi-point solve.
+    this._fallbackCenter = { x: cx, y: cy, ready: true };
+    this._fallbackAmp = {
+      x: _clamp(Math.max(0.06, ax * 2.4), 0.05, 0.28),
+      y: _clamp(Math.max(0.05, ay * 2.4), 0.045, 0.24),
+    };
+    return { cx, cy, ax, ay, samples: samples.length };
+  }
+
+  async _validateCalibration(mapping) {
+    const validationPoints = _buildValidationPoints(window.innerWidth, window.innerHeight);
+    let totalSq = 0;
+    let n = 0;
+
+    this._showCalibrationOverlay();
+    for (let i = 0; i < validationPoints.length; i += 1) {
+      const p = validationPoints[i];
+      this._moveCalibrationDot(p.sx, p.sy, `Validation ${i + 1}/${validationPoints.length}`);
+      await _sleep(260);
+
+      const samples = [];
+      const t0 = performance.now();
+      while (performance.now() - t0 < 420) {
+        const s = this._sampleIris(this.webcam.videoElement);
+        if (s && s.quality >= 0.15) {
+          const pred = _applyMappingFor(mapping, s);
+          if (pred) samples.push(pred);
+        }
+        await _sleep(28);
+      }
+
+      if (samples.length === 0) continue;
+      const avgX = samples.reduce((acc, s) => acc + s.x, 0) / samples.length;
+      const avgY = samples.reduce((acc, s) => acc + s.y, 0) / samples.length;
+      const err = Math.hypot(avgX - p.sx, avgY - p.sy);
+      totalSq += err * err;
+      n += 1;
+    }
+    this._dismissCalibrationOverlay();
+
+    if (n === 0) {
+      return { passed: false, rmsePx: Infinity, samples: 0, grade: 'poor' };
+    }
+
+    const rmsePx = Math.sqrt(totalSq / n);
+    const passed = rmsePx <= 230;
+    const grade = rmsePx <= 120 ? 'excellent' : rmsePx <= 180 ? 'good' : rmsePx <= 230 ? 'usable' : 'poor';
+    return { passed, rmsePx, samples: n, grade };
+  }
+}
+
+function _buildCalibrationGrid(width, height) {
+  const xs = [0.06, 0.5, 0.94].map((r) => width * r);
+  const ys = [0.06, 0.5, 0.94].map((r) => height * r);
+  const out = [];
+  for (const y of ys) {
+    for (const x of xs) out.push({ sx: x, sy: y });
+  }
+  return out;
+}
+
+function _buildValidationPoints(width, height) {
+  return [
+    { sx: width * 0.1, sy: height * 0.1 },
+    { sx: width * 0.9, sy: height * 0.1 },
+    { sx: width * 0.5, sy: height * 0.5 },
+    { sx: width * 0.1, sy: height * 0.9 },
+    { sx: width * 0.9, sy: height * 0.9 },
+  ];
+}
+
+function _buildQuickMappingFromBaseline(baseline, width, height) {
+  if (!baseline) return null;
+  const cx = baseline.cx;
+  const cy = baseline.cy;
+  const ax = Math.max(0.025, baseline.ax || 0.05);
+  const ay = Math.max(0.02, baseline.ay || 0.045);
+
+  const ux = _clamp(ax * 4.2, 0.05, 0.24);
+  const uy = _clamp(ay * 4.2, 0.045, 0.21);
+  const rx = width * 0.4;   // target ~80% span (10%..90%)
+  const ry = height * 0.4;
+
+  const points = [
+    { x: cx, y: cy, sx: width * 0.5, sy: height * 0.5 },
+    { x: cx + ux, y: cy, sx: width * 0.5 + rx, sy: height * 0.5 },
+    { x: cx - ux, y: cy, sx: width * 0.5 - rx, sy: height * 0.5 },
+    { x: cx, y: cy + uy, sx: width * 0.5, sy: height * 0.5 + ry },
+    { x: cx, y: cy - uy, sx: width * 0.5, sy: height * 0.5 - ry },
+    { x: cx + ux * 0.75, y: cy + uy * 0.75, sx: width * 0.5 + rx * 0.8, sy: height * 0.5 + ry * 0.8 },
+    { x: cx - ux * 0.75, y: cy + uy * 0.75, sx: width * 0.5 - rx * 0.8, sy: height * 0.5 + ry * 0.8 },
+    { x: cx + ux * 0.75, y: cy - uy * 0.75, sx: width * 0.5 + rx * 0.8, sy: height * 0.5 - ry * 0.8 },
+    { x: cx - ux * 0.75, y: cy - uy * 0.75, sx: width * 0.5 - rx * 0.8, sy: height * 0.5 - ry * 0.8 },
+  ];
+
+  return _fitQuadraticMapping(points, 0.0032);
+}
+
+function _basis(x, y) {
+  return [x, y, x * x, y * y, x * y, 1];
+}
+
+function _fitQuadraticMapping(samples, lambda = 0.001) {
+  if (!Array.isArray(samples) || samples.length < 6) return null;
+
+  const dim = 6;
+  const A = Array.from({ length: dim }, () => Array(dim).fill(0));
+  const bx = Array(dim).fill(0);
+  const by = Array(dim).fill(0);
+
+  for (const s of samples) {
+    const f = _basis(s.x, s.y);
+
+    for (let i = 0; i < dim; i += 1) {
+      bx[i] += f[i] * s.sx;
+      by[i] += f[i] * s.sy;
+      for (let j = 0; j < dim; j += 1) {
+        A[i][j] += f[i] * f[j];
+      }
+    }
+  }
+
+  for (let i = 0; i < dim; i += 1) A[i][i] += lambda;
+
+  const wx = _solveLinearSystem(A, bx);
+  const wy = _solveLinearSystem(A, by);
+
+  if (!wx || !wy) return null;
+  return { wx, wy };
+}
+
+function _solveLinearSystem(matrix, rhs) {
+  const n = matrix.length;
+  const a = matrix.map((row) => row.slice());
+  const b = rhs.slice();
+
+  for (let col = 0; col < n; col += 1) {
+    let pivot = col;
+    let best = Math.abs(a[col][col]);
+    for (let r = col + 1; r < n; r += 1) {
+      const v = Math.abs(a[r][col]);
+      if (v > best) {
+        best = v;
+        pivot = r;
+      }
+    }
+
+    if (best < 1e-10) return null;
+
+    if (pivot !== col) {
+      [a[col], a[pivot]] = [a[pivot], a[col]];
+      [b[col], b[pivot]] = [b[pivot], b[col]];
+    }
+
+    const diag = a[col][col];
+    for (let j = col; j < n; j += 1) a[col][j] /= diag;
+    b[col] /= diag;
+
+    for (let r = 0; r < n; r += 1) {
+      if (r === col) continue;
+      const f = a[r][col];
+      if (Math.abs(f) < 1e-12) continue;
+      for (let j = col; j < n; j += 1) a[r][j] -= f * a[col][j];
+      b[r] -= f * b[col];
+    }
+  }
+
+  return b;
+}
+
+function _dot(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i += 1) s += a[i] * b[i];
+  return s;
+}
+
+function _applyMappingFor(mapping, sample) {
+  const f = _basis(sample.x, sample.y);
+  const x = _dot(mapping.wx, f);
+  const y = _dot(mapping.wy, f);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+function _clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function _lerp(a, b, t) {
+  return a + (b - a) * t;
 }
 
 function _sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-// 2D affine fit from 3 point correspondences.
-// p1,p2,p3 carry .x .y (iris-space) plus .sx .sy (screen-space).
-// Returns matrix [[ax, bx, cx], [ay, by, cy]] s.t. screen = A @ [iris.x, iris.y, 1].
-function solveAffine3pt(p1, p2, p3) {
-  // S (2x3) = A (2x3) @ P (3x3) where P stacks [pi.x; pi.y; 1] as columns.
-  // → A = S @ inv(P)
-  const P = [
-    [p1.x, p2.x, p3.x],
-    [p1.y, p2.y, p3.y],
-    [1, 1, 1],
-  ];
-  const Pinv = _invert3x3(P);
-  const Sx = [p1.sx, p2.sx, p3.sx];
-  const Sy = [p1.sy, p2.sy, p3.sy];
-  const row = (S) => [
-    S[0]*Pinv[0][0] + S[1]*Pinv[1][0] + S[2]*Pinv[2][0],
-    S[0]*Pinv[0][1] + S[1]*Pinv[1][1] + S[2]*Pinv[2][1],
-    S[0]*Pinv[0][2] + S[1]*Pinv[1][2] + S[2]*Pinv[2][2],
-  ];
-  return [row(Sx), row(Sy)];
-}
-
-function _invert3x3(m) {
-  const a = m[0][0], b = m[0][1], c = m[0][2];
-  const d = m[1][0], e = m[1][1], f = m[1][2];
-  const g = m[2][0], h = m[2][1], i = m[2][2];
-  const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
-  if (Math.abs(det) < 1e-9) throw new Error('Calibration matrix singular — try recalibrating');
-  const invDet = 1 / det;
-  return [
-    [(e*i - f*h)*invDet, (c*h - b*i)*invDet, (b*f - c*e)*invDet],
-    [(f*g - d*i)*invDet, (a*i - c*g)*invDet, (c*d - a*f)*invDet],
-    [(d*h - e*g)*invDet, (b*g - a*h)*invDet, (a*e - b*d)*invDet],
-  ];
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
