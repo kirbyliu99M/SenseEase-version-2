@@ -7,6 +7,8 @@ import { EyeTracker }       from './core/EyeTracker.js'
 import { DataNormalizer }   from './core/DataNormalizer.js'
 import { VIMSPredictor }    from './core/VIMSPredictor.js'
 import { DitheringShader }  from './core/DitheringShader.js'
+import { WebcamSource }     from './core/WebcamSource.js'
+import { LuxSensor }        from './core/LuxSensor.js'
 
 // ── V4 Four-Layer Architecture ──────────────────────────
 const eyeTracker     = new EyeTracker();
@@ -1189,7 +1191,8 @@ if (mainVideo) {
     observer.setVideoState(true);
     renderController.setTargetElement(mainWrapper);
     inferenceEngine.setGlobalOverride(true);
-    startMainCircadianTimeline();
+    // Simulated circadian only when webcam mode is off — lux sensor owns warmth otherwise.
+    if (!webcamMode) startMainCircadianTimeline();
 
     // Smooth radius entry: ease from full-clear (100) → habRadius over ~3s
     const entryFrom   = 100;
@@ -1251,6 +1254,83 @@ if (mainPlayOverlay && mainVideo) {
   mainPlayOverlay.addEventListener('click', (e) => {
     e.stopPropagation();
     mainVideo.paused || mainVideo.ended ? mainVideo.play() : mainVideo.pause();
+  });
+}
+
+// ----- Webcam Mode: shared MediaStream + LuxSensor (Phase 5B) ----------------
+const webcamSource = new WebcamSource();
+let webcamMode = false;
+let luxSensor = null;
+const luxChip = document.getElementById('main-lux-chip');
+const webcamToggleBtn = document.getElementById('main-webcam-toggle');
+
+function setLuxChip(text) { if (luxChip) luxChip.innerText = text; }
+
+// Refresh the lux chip text every second (shows source + latest reading).
+setInterval(() => {
+  if (!webcamMode) return;
+  if (luxSensor && luxSensor.sourceLabel !== 'simulated') {
+    const reading = luxSensor.lastReading;
+    setLuxChip(reading ? `Ambient: ${reading} (${luxSensor.sourceLabel})` : `Ambient: ${luxSensor.sourceLabel}`);
+  } else {
+    setLuxChip('Ambient: webcam ready');
+  }
+}, 1000);
+
+async function enableWebcamMode() {
+  if (webcamMode) return;
+  if (webcamToggleBtn) { webcamToggleBtn.disabled = true; webcamToggleBtn.innerText = 'Requesting Camera…'; }
+
+  try {
+    await webcamSource.start();
+  } catch (e) {
+    console.warn('[Main] Webcam start failed:', e?.message || e);
+    if (webcamToggleBtn) {
+      webcamToggleBtn.disabled = false;
+      webcamToggleBtn.innerText = 'Enable Webcam Mode';
+    }
+    setLuxChip('Ambient: camera denied');
+    return;
+  }
+
+  webcamMode = true;
+
+  // Lux sensor takes over circadian warmth — pause the simulated timeline.
+  stopMainCircadianTimeline();
+
+  luxSensor = new LuxSensor(webcamSource, (warmth) => setCircadianWarmth(warmth));
+  await luxSensor.start();
+  setLuxChip(`Ambient: ${luxSensor.sourceLabel}`);
+
+  if (webcamToggleBtn) {
+    webcamToggleBtn.disabled = false;
+    webcamToggleBtn.innerText = 'Disable Webcam Mode';
+    webcamToggleBtn.classList.add('active');
+  }
+}
+
+function disableWebcamMode() {
+  if (!webcamMode) return;
+  webcamMode = false;
+
+  if (luxSensor) { luxSensor.stop(); luxSensor = null; }
+  webcamSource.stop();
+
+  // Resume simulated circadian if the demo video is still running.
+  if (mainVideo && !mainVideo.paused && !mainVideo.ended) {
+    startMainCircadianTimeline();
+  }
+
+  setLuxChip('Ambient: simulated');
+  if (webcamToggleBtn) {
+    webcamToggleBtn.innerText = 'Enable Webcam Mode';
+    webcamToggleBtn.classList.remove('active');
+  }
+}
+
+if (webcamToggleBtn) {
+  webcamToggleBtn.addEventListener('click', () => {
+    webcamMode ? disableWebcamMode() : enableWebcamMode();
   });
 }
 
