@@ -115,62 +115,18 @@
 
       <!-- Scenario Cards -->
       <div>
-        <div class="section-header">Four Core Operational Scenarios</div>
+        <div class="section-header">Main Operational Scenario</div>
         <div class="card">
-          <div class="grid grid-cols-4 gap-6">
+          <div class="grid grid-cols-1 gap-6 max-w-2xl mx-auto">
 
-            <!-- Scenario 1 -->
-            <div class="bg-[#E2ECFF] rounded-2xl overflow-hidden flex flex-col" style="display:none">
-              <img src="./assets/Scenario_1.jpg" alt="Scenario 1"
-                   class="w-full h-36 object-cover" />
-              <div class="p-4 flex-1 flex flex-col gap-2">
-                <span class="arch-badge self-start">Scenario 1 - Extreme VIMS</span>
-                <h3 class="text-black font-bold text-xs">High-Dynamic Video</h3>
-                <p class="text-black text-xs leading-relaxed flex-1">Blocks motion sickness instantly using FOV restriction and stationary anchors.</p>
-              </div>
-            </div>
-
-            <!-- Scenario 2 -->
+            <!-- Main Scenario -->
             <div class="bg-[#E2ECFF] rounded-2xl overflow-hidden flex flex-col">
-              <img src="./assets/Scenario_2.jpg" alt="Scenario 2"
-                   class="w-full h-36 object-cover" />
-              <div class="p-4 flex-1 flex flex-col gap-2">
-                <span class="arch-badge self-start">Scenario 2 - Local Flow</span>
-                <h3 class="text-black font-bold text-xs">Dynamic Stock Ticker</h3>
-                <p class="text-black text-xs leading-relaxed flex-1">Eliminates peripheral optical flow by blurring and reducing non-focal frame rates.</p>
-              </div>
-            </div>
-
-            <!-- Scenario 3 -->
-            <div class="bg-[#E2ECFF] rounded-2xl overflow-hidden flex flex-col">
-              <img src="./assets/Scenario_3.jpg" alt="Scenario 3"
-                   class="w-full h-36 object-cover" />
-              <div class="p-4 flex-1 flex flex-col gap-2">
-                <span class="arch-badge self-start">Scenario 2 - DES</span>
-                <h3 class="text-black font-bold text-xs">Adaptive Ambient Lighting Regulation for DES</h3>
-                <p class="text-black text-xs leading-relaxed flex-1">Smoothly adapts screen contrast to ambient light, relieving eye strain.</p>
-              </div>
-            </div>
-
-            <!-- Scenario 4 -->
-            <div class="bg-[#E2ECFF] rounded-2xl overflow-hidden flex flex-col">
-              <img src="./assets/Scenario_4.jpg" alt="Scenario 4"
-                   class="w-full h-36 object-cover" />
-              <div class="p-4 flex-1 flex flex-col gap-2">
-                <span class="arch-badge self-start">Scenario 3 - Prolonged DES</span>
-                <h3 class="text-black font-bold text-xs">Office Time-lapse</h3>
-                <p class="text-black text-xs leading-relaxed flex-1">Regulates circadian color temperature and suppresses screen flicker for eye comfort.</p>
-              </div>
-            </div>
-
-            <!-- Scenario 5 -->
-            <div class="bg-[#E2ECFF] rounded-2xl overflow-hidden flex flex-col">
-              <img src="./assets/Scenario_5.jpg" alt="Scenario 5"
-                   class="w-full h-36 object-cover" />
-              <div class="p-4 flex-1 flex flex-col gap-2">
-                <span class="arch-badge self-start">Scenario 4 - Habituation</span>
-                <h3 class="text-black font-bold text-xs">Progressive Habituation</h3>
-                <p class="text-black text-xs leading-relaxed flex-1">Trains vestibular adaptation through progressive FOV expansion using Chang-Hain framework.</p>
+              <img src="./assets/Scenario_1.jpg" alt="Main Scenario"
+                   class="w-full h-48 object-cover" />
+              <div class="p-5 flex-1 flex flex-col gap-3">
+                <span class="arch-badge self-start">Unified VIMS + DES Protection</span>
+                <h3 class="text-black font-bold text-base">Main Scenario — Adaptive Vestibular &amp; Visual Comfort</h3>
+                <p class="text-black text-sm leading-relaxed flex-1">A single integrated demonstration that fuses three protection layers: (1) Chang-Hain FOV restriction with stationary anchor grid intercepting Visually-Induced Motion Sickness in real time; (2) progressive vestibular habituation that gradually expands the clear field as the user adapts; (3) ambient-light-driven circadian colour shifting that suppresses Digital Eye Strain. Optional on-device webcam gaze tracking and ambient lux sensing intensify the demo without sending any frame data off the machine.</p>
               </div>
             </div>
 
@@ -202,18 +158,101 @@
 
     <!-- Sub-tabs -->
     <div class="bg-white border-b border-gray-200 px-6" id="demo-sub-tabs">
-      <button class="demo-sub-btn active" data-demo="demo-scen1">Scenario 1 - High-Dynamic Video</button>
+      <button class="demo-sub-btn active" data-demo="demo-main">Main Scenario</button>
+      <button class="demo-sub-btn" data-demo="demo-scen1" style="display:none">Scenario 1 - High-Dynamic Video</button>
       <button class="demo-sub-btn" data-demo="demo-scen2" style="display:none">Stock Trading Terminal</button>
-      <button class="demo-sub-btn" data-demo="demo-scen3">Scenario 2 - Adaptive Ambient Lighting Regulation for DES</button>
-      <button class="demo-sub-btn" data-demo="demo-scen4">Scenario 3 - Prolonged Office Work</button>
-      <button class="demo-sub-btn" data-demo="demo-scen5">Scenario 4 - Progressive Habituation</button>
+      <button class="demo-sub-btn" data-demo="demo-scen3" style="display:none">Scenario 2 - Adaptive Ambient Lighting Regulation for DES</button>
+      <button class="demo-sub-btn" data-demo="demo-scen4" style="display:none">Scenario 3 - Prolonged Office Work</button>
+      <button class="demo-sub-btn" data-demo="demo-scen5" style="display:none">Scenario 4 - Progressive Habituation</button>
     </div>
 
     <!-- Demo Panels -->
     <div class="px-6 py-6 max-w-6xl mx-auto">
 
       <!-- Panel 1: Video -->
-      <div id="demo-scen1" class="demo-panel active">
+      <!-- Panel: Main Scenario (Unified VIMS + DES) — primary user-facing demo -->
+      <div id="demo-main" class="demo-panel active">
+        <div class="card">
+          <div class="mb-4 flex items-start justify-between gap-4 flex-wrap">
+            <div class="flex-1 min-w-0">
+              <h2 class="text-black font-bold text-xl">Main Scenario — Unified VIMS + DES Protection</h2>
+              <p class="text-black text-sm opacity-60 mt-1">Three protection layers running concurrently: FOV restriction with Chang-Hain anchor grid (VIMS), progressive habituation expanding the clear field as you adapt, and ambient-light-driven circadian colour shifting (DES). Toggle Webcam Mode for on-device gaze + lux sensing.</p>
+            </div>
+            <div class="flex flex-col items-end gap-2">
+              <div id="main-circadian-badge" class="bg-[#024AD8] text-white text-xs font-bold px-3 py-1.5 rounded-full self-start">Morning</div>
+              <div id="main-lux-chip" class="bg-white border border-[#024AD8] text-[#024AD8] text-[11px] font-bold px-2.5 py-1 rounded-full">Ambient: simulated</div>
+            </div>
+          </div>
+
+          <!-- Webcam Mode controls -->
+          <div class="flex items-center gap-3 mb-3 flex-wrap">
+            <button id="main-webcam-toggle" class="demo-toggle-btn text-xs py-1.5 px-4">Enable Webcam Mode</button>
+            <button id="main-recalibrate-btn" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Recalibrate Gaze</button>
+            <span class="text-[11px] text-black opacity-50 leading-tight">Camera frames are processed on-device only. No data leaves your machine.</span>
+            <video id="main-webcam-preview" muted playsinline autoplay
+                   style="display:none;width:80px;height:60px;border-radius:6px;border:1px solid #024AD8;object-fit:cover;margin-left:auto;"></video>
+          </div>
+
+          <!-- Video container with circadian overlay layered on top -->
+          <div class="video-container" id="main-wrapper" style="position:relative;">
+            <video id="main-video" src="https://github.com/kirbyliu99M/SenseEase-version-1/releases/download/v1.0/redbull_skydiving.mp4" loop controls></video>
+            <div id="main-circadian-overlay" class="circadian-overlay"></div>
+            <div id="main-play-overlay" class="video-play-overlay">
+              <div class="video-play-btn">
+                <svg id="main-icon-play" viewBox="0 0 24 24" width="48" height="48"><polygon points="6,3 20,12 6,21" fill="white"/></svg>
+                <svg id="main-icon-pause" viewBox="0 0 24 24" width="48" height="48" style="display:none"><rect x="5" y="3" width="5" height="18" fill="white"/><rect x="14" y="3" width="5" height="18" fill="white"/></svg>
+              </div>
+            </div>
+          </div>
+
+          <!-- Circadian Progress Bar -->
+          <div class="mt-4">
+            <div class="flex justify-between text-xs text-black opacity-50 mb-1">
+              <span>Cool 6500K</span><span>Neutral 5000K</span><span>Warm 3500K</span><span>Amber 2700K</span>
+            </div>
+            <div class="w-full h-2 bg-[#E2ECFF] rounded-full overflow-hidden">
+              <div id="main-circadian-progress" class="h-full rounded-full transition-all duration-500" style="width:0%; background: linear-gradient(to right, #87CEEB, #FFD700, #FF8C00, #FF4500);"></div>
+            </div>
+          </div>
+
+          <!-- Habituation: Neural Adaptation Progress -->
+          <div class="mt-5">
+            <div class="flex justify-between text-xs text-black opacity-60 mb-1">
+              <span class="font-bold">Neural Adaptation Progress (Chang-Hain)</span>
+              <span id="main-hab-radius">Clear FOV: 15%</span>
+            </div>
+            <div class="w-full h-3 bg-[#E2ECFF] rounded-full overflow-hidden">
+              <div id="main-hab-progress" class="h-full rounded-full transition-all duration-700"
+                   style="width:0%;background:linear-gradient(to right,#024AD8,#00e676);"></div>
+            </div>
+            <div class="flex justify-between text-xs mt-1 opacity-40">
+              <span>Stage 1 - Minimal FOV (15%)</span><span>Full Exposure (115%)</span>
+            </div>
+          </div>
+
+          <!-- Stats row -->
+          <div class="grid grid-cols-3 gap-4 mt-4">
+            <div class="bg-[#E2ECFF] rounded-xl p-4 text-center">
+              <div class="text-2xl font-black text-[#024AD8]" id="main-hab-sessions">0</div>
+              <div class="text-xs font-bold mt-1 text-black">Adaptation Cycles</div>
+            </div>
+            <div class="bg-[#E2ECFF] rounded-xl p-4 text-center">
+              <div class="text-2xl font-black text-[#E54747]" id="main-hab-resets">0</div>
+              <div class="text-xs font-bold mt-1 text-black">Resets (HP IQ)</div>
+            </div>
+            <div class="bg-[#E2ECFF] rounded-xl p-4 text-center">
+              <div id="main-hab-status" class="text-sm font-bold text-[#024AD8]">Ready</div>
+              <div class="text-xs font-bold mt-1 text-black">Engine Status</div>
+            </div>
+          </div>
+
+          <!-- Event log -->
+          <div class="mt-4 bg-[#0a0f1a] rounded-xl p-3" id="main-hab-log"
+               style="font-family:monospace;font-size:0.75rem;height:90px;overflow-y:auto;"></div>
+        </div>
+      </div>
+
+      <div id="demo-scen1" class="demo-panel">
         <div class="card">
           <div class="mb-4">
             <h2 class="text-black font-bold text-xl">Scenario 1: Extreme VIMS</h2>
