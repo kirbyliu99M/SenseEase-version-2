@@ -791,8 +791,12 @@ function syncOfficeUI() {
 // Writes to BOTH the legacy S4 panel (#circadian-overlay/badge/progress, #office-video)
 // AND the new Main Scenario panel (#main-circadian-*, #main-video). Hidden panel's
 // writes are inert — keeps the rendering pipeline scenario-agnostic.
+// Live circadian state — read by stats panel for DES-protection detection.
+let currentWarmth = 0;
+
 function setCircadianWarmth(warmth01) {
   warmth01 = Math.max(0, Math.min(1, warmth01));
+  currentWarmth = warmth01;
 
   let label;
   if      (warmth01 < 0.15) label = '🌅 Morning';
@@ -1262,6 +1266,7 @@ let statIntercepts   = 0;
 let statPeakFlow     = 0;
 let statPeakPressure = 0;
 let statWasMaskActive = false;
+let warmShiftSeconds = 0;            // cumulative seconds spent in warm-shift DES protection
 const statsSessionStart = Date.now();
 let desProtectionHistory = []; // parallel bool array: was DES protection on at each second?
 let baselinePressure = 0;
@@ -1347,14 +1352,25 @@ function updateCharts() {
   if (elIF) elIF.innerText = statIntercepts;
   if (elPF) elPF.innerText = statPeakFlow.toFixed(1);
   if (elPP) elPP.innerText = statPeakPressure.toFixed(1);
+  const elWS = document.getElementById('stat-warm-shift');
+  if (elWS) {
+    elWS.innerText = warmShiftSeconds >= 60
+      ? `${Math.floor(warmShiftSeconds/60)}m ${warmShiftSeconds%60}s`
+      : `${warmShiftSeconds}s`;
+  }
 
   if (!vimsChartProtected || !vimsChartBaseline || !desChart) return;
 
-  // DES fatigue: baseline +1/s, with protection +0.3/s
-  const desOn = document.querySelector('.des-container.bright-room, .des-container.dark-room') !== null
+  // DES protection is active when:
+  //   1. Legacy S3 panel is in adaptive lighting mode (.bright-room/.dark-room), OR
+  //   2. Main Scenario circadian warmth > 0.4 (warm shift engaged), OR
+  //   3. NPU mask is active (peripheral occlusion attenuates flicker exposure too)
+  const desOn = currentWarmth > 0.4
+    || document.querySelector('.des-container.bright-room, .des-container.dark-room') !== null
     || renderController.npuActive;
   desFatigueRaw += 1;
   desFatigue    += desOn ? 0.3 : 1;
+  if (currentWarmth > 0.4) warmShiftSeconds += 1;
 
   const rawFlow = inferenceEngine.observer.opticalFlow;
   const weight = inferenceEngine.passiveFlowWeight * 0.05;

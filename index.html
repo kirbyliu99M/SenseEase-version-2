@@ -525,7 +525,7 @@ observer.subscribe((flow, intent) => {
       <!-- Summary Metrics -->
       <div class="card">
         <h2 class="text-black font-bold text-lg mb-4">Session Summary</h2>
-        <div class="grid grid-cols-4 gap-4">
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div class="metric-chip text-center">
             <div class="text-[#024AD8] font-black text-2xl leading-none" id="stat-intercepts">0</div>
             <div class="text-black text-[10px] uppercase tracking-wider mt-1">FOV Intercepts</div>
@@ -537,6 +537,10 @@ observer.subscribe((flow, intent) => {
           <div class="metric-chip text-center">
             <div class="text-[#024AD8] font-black text-2xl leading-none" id="stat-peak-pressure">0.0</div>
             <div class="text-black text-[10px] uppercase tracking-wider mt-1">Peak VIMS Pressure</div>
+          </div>
+          <div class="metric-chip text-center">
+            <div class="text-[#024AD8] font-black text-2xl leading-none" id="stat-warm-shift">0s</div>
+            <div class="text-black text-[10px] uppercase tracking-wider mt-1">Warm Shift Time</div>
           </div>
           <div class="metric-chip text-center">
             <div class="text-[#024AD8] font-black text-2xl leading-none" id="stat-uptime">0s</div>
