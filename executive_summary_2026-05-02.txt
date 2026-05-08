@@ -30,7 +30,9 @@ FOUR-LAYER ENGINEERING ARCHITECTURE
   Layer 1 — Sensing:
     HP Look to Move gaze vectors, mouse/keyboard/touchpad event streams, and
     DOM scroll velocity are fused to compute Optical Flow Intensity (OFI).
-    No camera required — zero privacy risk.
+    Camera optional; gaze and ambient-lux processing run fully on-device via
+    Google MediaPipe FaceLandmarker and the AmbientLightSensor API, so no
+    frame data ever leaves the machine.
 
   Layer 2 — Inference:
     An ALSTM-FCN model maintains a rolling VIMS Pressure Index. Efference Copy
