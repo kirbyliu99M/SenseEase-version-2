@@ -281,8 +281,22 @@ function setDemoTarget(demoId) {
     } else {
       renderController.setTargetElement(null);
     }
+  } else if (demoId === 'demo-main') {
+    // Main Scenario: unified VIMS (FOV mask) + Habituation + Circadian DES.
+    // Targets the new #main-* panel; hab and circadian engines self-activate
+    // on video play via the listeners further down.
+    const mv = document.getElementById('main-video');
+    const mw = document.getElementById('main-wrapper');
+    console.assert(!!mv && !!mw, '[setDemoTarget] Main Scenario elements missing.');
+    observer.setTarget(mv, 'video');
+    observer.setVideoState(!!mv && !mv.paused && !mv.ended);
+    if (mv && !mv.paused) {
+      renderController.setTargetElement(mw);
+    } else {
+      renderController.setTargetElement(null);
+    }
   } else {
-    renderController.setTargetElement(null); // Demo 2/3/4: no circular FOV
+    renderController.setTargetElement(null); // hidden demos: no circular FOV
     observer.setTarget(null);
   }
 }
@@ -773,39 +787,88 @@ function syncOfficeUI() {
   if (flickerOverlay)  flickerOverlay.style.opacity  = playing ? '1' : '0';
 }
 
-function updateCircadian(progress) {
-  if (circadianProgress) circadianProgress.style.width = (progress * 100).toFixed(1) + '%';
-
-  // Logistic warmth curve — slow at day edges, fast through midday transition
-  const warmth = 1 / (1 + Math.exp(-10 * (progress - 0.5)));
-
-  // Night-sharpness text enhancement when sufficiently dark
-  const scen4Panel = document.getElementById('demo-scen4');
-  if (scen4Panel) scen4Panel.classList.toggle('night-sharp', progress > 0.65);
+// setCircadianWarmth(warmth01) — single source of truth for circadian visuals.
+// Writes to BOTH the legacy S4 panel (#circadian-overlay/badge/progress, #office-video)
+// AND the new Main Scenario panel (#main-circadian-*, #main-video). Hidden panel's
+// writes are inert — keeps the rendering pipeline scenario-agnostic.
+function setCircadianWarmth(warmth01) {
+  warmth01 = Math.max(0, Math.min(1, warmth01));
 
   let label;
-  if      (progress < 0.15) label = '🌅 Morning';
-  else if (progress < 0.45) label = '☀️ Afternoon';
-  else if (progress < 0.75) label = '🌇 Evening';
-  else                       label = '🌙 Night';
-  if (circadianBadge) circadianBadge.textContent = label;
-
-  if (!circadianOverlay) return;
+  if      (warmth01 < 0.15) label = '🌅 Morning';
+  else if (warmth01 < 0.45) label = '☀️ Afternoon';
+  else if (warmth01 < 0.75) label = '🌇 Evening';
+  else                      label = '🌙 Night';
 
   // Overlay: transparent morning → warm amber-red night
   const r = 255;
-  const g = Math.round(220 - warmth * 130);  // 220 → 90
-  const b = Math.round(100 - warmth * 80);   // 100 → 20
-  const alpha = (warmth * 0.18).toFixed(3);
-  circadianOverlay.style.background = `rgba(${r},${g},${b},${alpha})`;
-  circadianOverlay.style.opacity    = String(Math.min(warmth * 0.95, 0.95));
+  const g = Math.round(220 - warmth01 * 130);  // 220 → 90
+  const b = Math.round(100 - warmth01 * 80);   // 100 → 20
+  const alpha   = (warmth01 * 0.18).toFixed(3);
+  const bg      = `rgba(${r},${g},${b},${alpha})`;
+  const opacity = String(Math.min(warmth01 * 0.95, 0.95));
+  const widthStr = (warmth01 * 100).toFixed(1) + '%';
 
-  // CSS filter on video for blue-light warmth shift
-  if (officeVideo) {
-    const sepia  = (warmth * 0.3).toFixed(3);
-    const hueRot = Math.round(warmth * -14);
-    officeVideo.style.filter = `sepia(${sepia}) hue-rotate(${hueRot}deg)`;
+  const sepia  = (warmth01 * 0.3).toFixed(3);
+  const hueRot = Math.round(warmth01 * -14);
+  const filter = `sepia(${sepia}) hue-rotate(${hueRot}deg)`;
+
+  function _apply(overlayId, badgeId, progressId, videoId) {
+    const overlay = document.getElementById(overlayId);
+    const badge   = document.getElementById(badgeId);
+    const prog    = document.getElementById(progressId);
+    const video   = videoId && document.getElementById(videoId);
+    if (overlay) {
+      overlay.style.background = bg;
+      overlay.style.opacity    = opacity;
+    }
+    if (badge) badge.textContent = label;
+    if (prog)  prog.style.width  = widthStr;
+    if (video) video.style.filter = filter;
   }
+
+  // Legacy S4 binding
+  _apply('circadian-overlay', 'circadian-badge', 'circadian-progress', 'office-video');
+  // Main Scenario binding
+  _apply('main-circadian-overlay', 'main-circadian-badge', 'main-circadian-progress', 'main-video');
+
+  // Night-sharpness text enhancement when sufficiently dark
+  const scen4Panel = document.getElementById('demo-scen4');
+  const mainPanel  = document.getElementById('demo-main');
+  if (scen4Panel) scen4Panel.classList.toggle('night-sharp', warmth01 > 0.65);
+  if (mainPanel)  mainPanel.classList.toggle('night-sharp', warmth01 > 0.65);
+}
+
+// Legacy wrapper — S4 video-time-driven circadian (linear progress 0→1 → logistic warmth)
+function updateCircadian(progress) {
+  const warmth = 1 / (1 + Math.exp(-10 * (progress - 0.5)));
+  setCircadianWarmth(warmth);
+}
+
+// Main Scenario circadian timeline — simulated 60-second cool→warm→cool loop.
+// Drives setCircadianWarmth at RAF cadence. Replaced by real lux input in Phase 5.
+const MAIN_CIRCADIAN_DURATION_MS = 60000;
+let mainCircadianStart = null;
+let mainCircadianRaf   = null;
+
+function startMainCircadianTimeline() {
+  if (mainCircadianRaf) return;
+  mainCircadianStart = performance.now();
+  function loop() {
+    const elapsed  = performance.now() - mainCircadianStart;
+    // Triangle wave 0→1→0 over (2 × duration) so it cycles cool→warm→cool
+    const t        = (elapsed % (2 * MAIN_CIRCADIAN_DURATION_MS)) / MAIN_CIRCADIAN_DURATION_MS;
+    const progress = t <= 1 ? t : 2 - t;
+    const warmth   = 1 / (1 + Math.exp(-10 * (progress - 0.5)));
+    setCircadianWarmth(warmth);
+    mainCircadianRaf = requestAnimationFrame(loop);
+  }
+  mainCircadianRaf = requestAnimationFrame(loop);
+}
+
+function stopMainCircadianTimeline() {
+  if (mainCircadianRaf) cancelAnimationFrame(mainCircadianRaf);
+  mainCircadianRaf = null;
 }
 
 if (officeVideo) {
@@ -872,28 +935,56 @@ let habWeakenTO   = null;
 let habCoolingUntil = 0;
 
 function habLog(msg) {
-  if (!habLogEl) return;
-  const now  = new Date().toLocaleTimeString();
-  const line = document.createElement('div');
-  line.style.color = msg.includes('Reset') || msg.includes('Penalty') ? '#ff4a4a' : '#00e676';
-  line.textContent = `[${now}] ${msg}`;
-  habLogEl.appendChild(line);
-  habLogEl.scrollTop = habLogEl.scrollHeight;
+  const now   = new Date().toLocaleTimeString();
+  const color = msg.includes('Reset') || msg.includes('Penalty') ? '#ff4a4a' : '#00e676';
+  const text  = `[${now}] ${msg}`;
+  function _appendTo(el) {
+    if (!el) return;
+    const line = document.createElement('div');
+    line.style.color = color;
+    line.textContent = text;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+  _appendTo(habLogEl);
+  _appendTo(document.getElementById('main-hab-log'));
 }
 
 function updateHabUI() {
-  const pct = ((habRadius - HAB_MIN) / (HAB_MAX - HAB_MIN)) * 100;
-  if (habProgressEl)    habProgressEl.style.width   = Math.min(100, Math.max(0, pct)).toFixed(1) + '%';
-  if (habRadiusDisplay) habRadiusDisplay.innerText   = `Clear FOV: ${habRadius.toFixed(0)}%`;
-  if (habSessionsEl)    habSessionsEl.innerText      = habSessions;
-  if (habResetsEl)      habResetsEl.innerText        = habResets;
+  const pct        = ((habRadius - HAB_MIN) / (HAB_MAX - HAB_MIN)) * 100;
+  const widthStr   = Math.min(100, Math.max(0, pct)).toFixed(1) + '%';
+  const radiusText = `Clear FOV: ${habRadius.toFixed(0)}%`;
+
+  // Legacy S5 panel
+  if (habProgressEl)    habProgressEl.style.width   = widthStr;
+  if (habRadiusDisplay) habRadiusDisplay.innerText  = radiusText;
+  if (habSessionsEl)    habSessionsEl.innerText     = habSessions;
+  if (habResetsEl)      habResetsEl.innerText       = habResets;
+
+  // Main Scenario panel
+  const mProgress = document.getElementById('main-hab-progress');
+  const mRadius   = document.getElementById('main-hab-radius');
+  const mSessions = document.getElementById('main-hab-sessions');
+  const mResets   = document.getElementById('main-hab-resets');
+  if (mProgress) mProgress.style.width = widthStr;
+  if (mRadius)   mRadius.innerText     = radiusText;
+  if (mSessions) mSessions.innerText   = habSessions;
+  if (mResets)   mResets.innerText     = habResets;
+
   renderController.radiusOverride = habRadius;
+}
+
+function setHabStatus(text, color) {
+  if (habStatusEl) { habStatusEl.innerText = text; habStatusEl.style.color = color; }
+  const m = document.getElementById('main-hab-status');
+  if (m) { m.innerText = text; m.style.color = color; }
 }
 
 function startHabEngine() {
   if (Date.now() < habCoolingUntil) return;
   if (habRafId) return;
-  if (habStatusEl) { habStatusEl.innerText = 'Training ▶'; habStatusEl.style.color = '#00e676'; }
+  renderController.setNpuState(true);
+  setHabStatus('Training ▶', '#00e676');
   habLog(`Engine started — FOV radius: ${habRadius.toFixed(1)}%`);
   const increment = (HAB_MAX - HAB_MIN) * 0.00005; // ~0.005% of range per frame (~3–4 min full range)
   function habLoop() {
@@ -925,7 +1016,7 @@ function stopHabEngine() {
   clearTimeout(habWeakenTO);
   habCoolingUntil = 0;
   habFrameCount = 0;
-  if (habStatusEl) { habStatusEl.innerText = 'Paused ⏸'; habStatusEl.style.color = '#60a5fa'; }
+  setHabStatus('Paused ⏸', '#60a5fa');
 }
 
 function habComplaintPenalty() {
@@ -936,14 +1027,14 @@ function habComplaintPenalty() {
   habResets++;
   habPenalized  = true;
   habLog(`⚠ Adaptation Reset — FOV shrunk to ${habRadius.toFixed(1)}%. Engine locked 8s.`);
-  if (habStatusEl) { habStatusEl.innerText = 'Locked ⛔'; habStatusEl.style.color = '#E54747'; }
+  setHabStatus('Locked ⛔', '#E54747');
   updateHabUI();
   clearTimeout(habPenaltyTO);
-  // Restart engine after penalty window ONLY if video is still playing
+  // Restart engine after penalty window ONLY if the active demo video is still playing
   habPenaltyTO = setTimeout(() => {
     habPenalized = false;
     habLog('Penalty window ended — resuming expansion.');
-    if (habVideo && !habVideo.paused && !habVideo.ended) startHabEngine();
+    if (_isActiveDemoVideoPlaying()) startHabEngine();
   }, 8000);
 }
 
@@ -956,12 +1047,12 @@ function habWeakenProtection() {
   habRadius = Math.min(HAB_MAX, habRadius + 5);
   updateHabUI();
   habLog(`User tolerance assist: FOV widened +5% to ${habRadius.toFixed(1)}%. Cooldown 5s.`);
-  if (habStatusEl) { habStatusEl.innerText = 'Cooling (5s)'; habStatusEl.style.color = '#f59e0b'; }
+  setHabStatus('Cooling (5s)', '#f59e0b');
 
   habWeakenTO = setTimeout(() => {
     habPenalized = false;
-    habLog('Cooldown ended ??resuming gradual expansion.');
-    if (habVideo && !habVideo.paused && !habVideo.ended) startHabEngine();
+    habLog('Cooldown ended — resuming gradual expansion.');
+    if (_isActiveDemoVideoPlaying()) startHabEngine();
   }, 5000);
 }
 
@@ -1041,24 +1132,123 @@ if (habPlayOverlay && habVideo) {
   });
 }
 
-// Wire chatbot complaint to habituation penalty when Scenario 5 is active
+// Wire chatbot complaint/weaken to the habituation engine for any demo that
+// uses the hab engine (Scenario 5 legacy panel + new Main Scenario panel).
+function _isHabDemoActive() {
+  const d = document.querySelector('.demo-sub-btn.active')?.dataset.demo;
+  return d === 'demo-scen5' || d === 'demo-main';
+}
+
 chatbotUI.onComplain = () => {
-  const activeDemo = document.querySelector('.demo-sub-btn.active');
-  if (activeDemo?.dataset.demo === 'demo-scen5') {
-    habComplaintPenalty();
-  } else {
-    inferenceEngine.handleUserComplaint();
-  }
+  if (_isHabDemoActive()) habComplaintPenalty();
+  else                    inferenceEngine.handleUserComplaint();
 };
 
 chatbotUI.onWeaken = () => {
-  const activeDemo = document.querySelector('.demo-sub-btn.active');
-  if (activeDemo?.dataset.demo === 'demo-scen5') {
-    habWeakenProtection();
-  } else {
-    renderController.relaxMask(15);
-  }
+  if (_isHabDemoActive()) habWeakenProtection();
+  else                    renderController.relaxMask(15);
 };
+
+// ======================================================
+// Main Scenario engine — unified VIMS (FOV mask) + Habituation + Circadian DES.
+// Reuses the hab engine (startHabEngine, habRadius, habComplaintPenalty etc.)
+// declared above. Adds its own video event listeners and the simulated
+// circadian timeline driver (real lux input arrives in Phase 5).
+// ======================================================
+const mainVideo       = document.getElementById('main-video');
+const mainPlayOverlay = document.getElementById('main-play-overlay');
+const mainIconPlay    = document.getElementById('main-icon-play');
+const mainIconPause   = document.getElementById('main-icon-pause');
+const mainWrapper     = document.getElementById('main-wrapper');
+
+function _isActiveDemoVideoPlaying() {
+  const d = document.querySelector('.demo-sub-btn.active')?.dataset.demo;
+  if (d === 'demo-main'  && mainVideo && !mainVideo.paused && !mainVideo.ended) return true;
+  if (d === 'demo-scen5' && habVideo  && !habVideo.paused  && !habVideo.ended)  return true;
+  return false;
+}
+
+function syncMainUI() {
+  if (!mainVideo) return;
+  const playing = !mainVideo.paused && !mainVideo.ended;
+  if (mainPlayOverlay) mainPlayOverlay.classList.toggle('playing', playing);
+  if (mainIconPlay)    mainIconPlay.style.display  = playing ? 'none' : '';
+  if (mainIconPause)   mainIconPause.style.display = playing ? '' : 'none';
+}
+
+if (mainVideo) {
+  syncMainUI();
+
+  mainVideo.addEventListener('play', () => {
+    syncMainUI();
+    observer.setTarget(mainVideo, 'video');
+    observer.setVideoState(true);
+    renderController.setTargetElement(mainWrapper);
+    inferenceEngine.setGlobalOverride(true);
+    startMainCircadianTimeline();
+
+    // Smooth radius entry: ease from full-clear (100) → habRadius over ~3s
+    const entryFrom   = 100;
+    const entryTarget = habRadius;
+    const entryFrames = 180;
+    let   entryF      = 0;
+    renderController.radiusOverride = entryFrom;
+
+    function entryLoop() {
+      entryF++;
+      const t     = Math.min(entryF / entryFrames, 1);
+      const eased = 1 - Math.pow(1 - t, 2);
+      renderController.radiusOverride = entryFrom - (entryFrom - entryTarget) * eased;
+      if (t < 1) {
+        requestAnimationFrame(entryLoop);
+      } else {
+        renderController.radiusOverride = entryTarget;
+        startHabEngine();
+      }
+    }
+    requestAnimationFrame(entryLoop);
+  });
+
+  mainVideo.addEventListener('playing', () => {
+    syncMainUI();
+    observer.setTarget(mainVideo, 'video');
+    observer.setVideoState(true);
+  });
+
+  mainVideo.addEventListener('pause', () => {
+    syncMainUI();
+    observer.setVideoState(false);
+    stopHabEngine();
+    stopMainCircadianTimeline();
+    clearTimeout(habWeakenTO);
+    clearTimeout(habPenaltyTO);
+    habPenalized = false;
+    habCoolingUntil = 0;
+    inferenceEngine.setGlobalOverride(false);
+    renderController.radiusOverride = null;
+    renderController.setTargetElement(null);
+  });
+
+  mainVideo.addEventListener('ended', () => {
+    syncMainUI();
+    observer.setVideoState(false);
+    stopHabEngine();
+    stopMainCircadianTimeline();
+    clearTimeout(habWeakenTO);
+    clearTimeout(habPenaltyTO);
+    habPenalized = false;
+    habCoolingUntil = 0;
+    inferenceEngine.setGlobalOverride(false);
+    renderController.radiusOverride = null;
+  });
+}
+
+if (mainPlayOverlay && mainVideo) {
+  mainPlayOverlay.addEventListener('click', (e) => {
+    e.stopPropagation();
+    mainVideo.paused || mainVideo.ended ? mainVideo.play() : mainVideo.pause();
+  });
+}
 
 // ======================================================
 // Statistics Dashboard — Chart.js charts
