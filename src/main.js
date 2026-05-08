@@ -9,6 +9,7 @@ import { VIMSPredictor }    from './core/VIMSPredictor.js'
 import { DitheringShader }  from './core/DitheringShader.js'
 import { WebcamSource }     from './core/WebcamSource.js'
 import { LuxSensor }        from './core/LuxSensor.js'
+import { GazeTracker }      from './core/GazeTracker.js'
 
 // ── V4 Four-Layer Architecture ──────────────────────────
 const eyeTracker     = new EyeTracker();
@@ -1257,12 +1258,15 @@ if (mainPlayOverlay && mainVideo) {
   });
 }
 
-// ----- Webcam Mode: shared MediaStream + LuxSensor (Phase 5B) ----------------
+// ----- Webcam Mode: shared MediaStream + LuxSensor + GazeTracker (Phase 5) ---
 const webcamSource = new WebcamSource();
 let webcamMode = false;
 let luxSensor = null;
+let gazeTracker = null;
+let gazeCalibrated = false;
 const luxChip = document.getElementById('main-lux-chip');
 const webcamToggleBtn = document.getElementById('main-webcam-toggle');
+const recalibrateBtn  = document.getElementById('main-recalibrate-btn');
 
 function setLuxChip(text) { if (luxChip) luxChip.innerText = text; }
 
@@ -1302,6 +1306,28 @@ async function enableWebcamMode() {
   await luxSensor.start();
   setLuxChip(`Ambient: ${luxSensor.sourceLabel}`);
 
+  // Start the MediaPipe gaze tracker. Lazy-loads ~3-5MB on first use.
+  gazeTracker = new GazeTracker(webcamSource, (gx, gy) => {
+    eyeTracker.gazeOverride = { x: gx, y: gy };
+  });
+  try {
+    await gazeTracker.start();
+    if (recalibrateBtn) recalibrateBtn.style.display = '';
+    if (!gazeCalibrated) {
+      // Auto-calibrate on first webcam enable.
+      try {
+        await gazeTracker.calibrate();
+        gazeCalibrated = true;
+      } catch (calErr) {
+        console.warn('[Main] Gaze calibration failed:', calErr?.message || calErr);
+        // Leave gaze inactive; user can hit Recalibrate to retry.
+      }
+    }
+  } catch (e) {
+    console.warn('[Main] Gaze tracker init failed (likely network/CDN):', e?.message || e);
+    gazeTracker = null;
+  }
+
   if (webcamToggleBtn) {
     webcamToggleBtn.disabled = false;
     webcamToggleBtn.innerText = 'Disable Webcam Mode';
@@ -1313,6 +1339,8 @@ function disableWebcamMode() {
   if (!webcamMode) return;
   webcamMode = false;
 
+  if (gazeTracker) { gazeTracker.stop(); gazeTracker = null; }
+  eyeTracker.gazeOverride = null;          // restore mouse-driven gaze
   if (luxSensor) { luxSensor.stop(); luxSensor = null; }
   webcamSource.stop();
 
@@ -1322,10 +1350,27 @@ function disableWebcamMode() {
   }
 
   setLuxChip('Ambient: simulated');
+  if (recalibrateBtn) recalibrateBtn.style.display = 'none';
   if (webcamToggleBtn) {
     webcamToggleBtn.innerText = 'Enable Webcam Mode';
     webcamToggleBtn.classList.remove('active');
   }
+}
+
+if (recalibrateBtn) {
+  recalibrateBtn.addEventListener('click', async () => {
+    if (!gazeTracker || !webcamMode) return;
+    recalibrateBtn.disabled = true;
+    recalibrateBtn.innerText = 'Calibrating…';
+    try {
+      await gazeTracker.calibrate();
+      gazeCalibrated = true;
+    } catch (e) {
+      console.warn('[Main] Recalibration failed:', e?.message || e);
+    }
+    recalibrateBtn.disabled = false;
+    recalibrateBtn.innerText = 'Recalibrate Gaze';
+  });
 }
 
 if (webcamToggleBtn) {
