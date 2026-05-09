@@ -195,7 +195,7 @@
           <!-- Webcam Mode controls -->
           <div class="flex items-center gap-3 mb-2 flex-wrap">
             <button id="main-webcam-toggle" class="demo-toggle-btn text-xs py-1.5 px-4">Enable Webcam Mode</button>
-            <button id="main-backend-toggle" class="demo-toggle-btn text-xs py-1.5 px-4">Backend: MediaPipe</button>
+            <button id="main-backend-toggle" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none" aria-hidden="true">Backend: MediaPipe</button>
             <button id="main-recalibrate-btn" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Recalibrate Gaze</button>
             <button id="main-debug-toggle" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Hide Debug</button>
             <button id="main-marker-toggle" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Hide Gaze Marker</button>
@@ -204,7 +204,7 @@
 
           <!-- Live status strip: bridge availability + gaze cue. Updated dynamically. -->
           <div id="main-status-strip" class="text-[11px] mb-3 leading-tight" style="min-height:18px;">
-            <span id="main-bridge-hint" class="text-black opacity-55"></span>
+            <span id="main-bridge-hint" class="text-black opacity-55" style="display:none" aria-hidden="true"></span>
             <span id="main-gaze-hint" class="text-[#024AD8] font-bold" style="display:none;">◉ Gaze tracking active — your eyes steer the Chang-Hain clear-FOV zone in real time.</span>
             <span id="main-gaze-lost" class="font-bold text-[#E54747]" style="display:none;">⚠ Gaze lost — please face the camera. Click <em>Recalibrate Gaze</em> if it doesn't recover.</span>
           </div>

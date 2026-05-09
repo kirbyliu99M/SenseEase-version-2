@@ -32,3 +32,6 @@ __pycache__/
 *.njsproj
 *.sln
 *.sw?
+
+# Intel GPU compute kernel error dumps (OpenVINO compile failures on iGPU)
+kernel.errors.txt

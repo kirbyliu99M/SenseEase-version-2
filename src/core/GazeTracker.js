@@ -26,7 +26,11 @@ export class GazeTracker {
     this._fallbackAmp = { x: 0.09, y: 0.07 };
     this._activeDelegate = 'none';
     this._inferenceMsEma = 0;
-    this._frameIntervalMs = 28; // ~35 Hz cap; loosened to ~22ms for GPU delegate
+    // Aggressive cadence for low latency: ~50 Hz CPU, ~60 Hz GPU. The
+    // adaptive frame skip in _sampleIris widens this when inference takes
+    // long, so we never queue work — fast CPUs run at the cap, slower
+    // ones self-throttle.
+    this._frameIntervalMs = 20; // CPU default; GPU drops to 16 in _ensureMediaPipe
   }
 
   async _ensureMediaPipe() {
@@ -57,7 +61,7 @@ export class GazeTracker {
     try {
       this.faceLandmarker = await FaceLandmarker.createFromOptions(wasmFileset, buildOptions('GPU'));
       this._activeDelegate = 'GPU';
-      this._frameIntervalMs = 22; // GPU is ~2x faster — let it run closer to 45 Hz
+      this._frameIntervalMs = 16; // GPU runs ~60 Hz cap; adaptive skip backs off if inference EMA exceeds it
       this._loadState = 'ready';
       return;
     } catch (gpuErr) {
@@ -159,6 +163,10 @@ export class GazeTracker {
     await this._ensureMediaPipe();
     this._isReady = true;
 
+    // 16 ms onFrame throttle so the WebcamSource fires us at the cap of
+    // ~60 Hz; the inner _sampleIris adaptive skip is what actually
+    // controls whether we run inference or pass. Two-layer throttle was
+    // holding us back from 50 Hz on capable machines.
     this._unsubFrame = this.webcam.onFrame((video) => {
       if (this._calibrating) return;
 
@@ -173,7 +181,7 @@ export class GazeTracker {
         source: 'mediapipe',
         ts: performance.now(),
       });
-    }, 24);
+    }, 16);
   }
 
   stop() {

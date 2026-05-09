@@ -1092,7 +1092,7 @@ function startHabEngine() {
   if (habRafId) return;
   renderController.setNpuState(true);
   setHabStatus('Training', '#00e676');
-  habLog(`Engine started ??FOV radius: ${habRadius.toFixed(1)}%`);
+  habLog(`Engine started — FOV radius: ${habRadius.toFixed(1)}%`);
   const increment = (HAB_MAX - HAB_MIN) * 0.00005; // ~0.005% of range per frame (~3?? min full range)
   function habLoop() {
     if (!habPenalized) {
@@ -1133,14 +1133,14 @@ function habComplaintPenalty() {
   habRadius     = Math.max(HAB_MIN, habRadius - 15);
   habResets++;
   habPenalized  = true;
-  habLog(`??Adaptation Reset ??FOV shrunk to ${habRadius.toFixed(1)}%. Engine locked 8s.`);
+  habLog(`⚠ Adaptation Reset — FOV shrunk to ${habRadius.toFixed(1)}%. Engine locked 8s.`);
   setHabStatus('Locked', '#E54747');
   updateHabUI();
   clearTimeout(habPenaltyTO);
   // Restart engine after penalty window ONLY if the active demo video is still playing
   habPenaltyTO = setTimeout(() => {
     habPenalized = false;
-    habLog('Penalty window ended ??resuming expansion.');
+    habLog('Penalty window ended — resuming expansion.');
     if (_isActiveDemoVideoPlaying()) startHabEngine();
   }, 8000);
 }
@@ -1158,7 +1158,7 @@ function habWeakenProtection() {
 
   habWeakenTO = setTimeout(() => {
     habPenalized = false;
-    habLog('Cooldown ended ??resuming gradual expansion.');
+    habLog('Cooldown ended — resuming gradual expansion.');
     if (_isActiveDemoVideoPlaying()) startHabEngine();
   }, 5000);
 }
@@ -1290,13 +1290,13 @@ if (mainVideo) {
         stopHabEngine();
         inferenceEngine.setGlobalOverride(false);
         renderController.radiusOverride = null;
-        btnStartHab.innerText = '??Start Neural Adaptation';
+        btnStartHab.innerText = '▶ Start Neural Adaptation';
         btnStartHab.classList.remove('active');
         return;
       }
 
       // Otherwise, start it
-      btnStartHab.innerText = '??Stop Neural Adaptation';
+      btnStartHab.innerText = '⏸ Stop Neural Adaptation';
       btnStartHab.classList.add('active');
       if (mainVideo.paused || mainVideo.ended) mainVideo.play();
       
@@ -1380,7 +1380,21 @@ const recalibrateBtn = document.getElementById('main-recalibrate-btn');
 const debugToggleBtn = document.getElementById('main-debug-toggle');
 let gazeDebugPanel = null;
 let gazeDebugVisible = false;
-let gazeBackend = localStorage.getItem('senseease_gaze_backend') || 'mediapipe';
+// OpenVINO Bridge backend is hidden in the public UI: MediaPipe (with the
+// in-house calibration tuning) outperforms the bridge for this product, and
+// the bridge adds Python-server complexity that doesn't pay off. The code
+// path stays intact so a follow-up can re-enable it via a feature flag if
+// the AI PC narrative ever needs it. To revive: set BRIDGE_BACKEND_ENABLED
+// to true and unhide #main-backend-toggle + #main-bridge-hint in index.html.
+const BRIDGE_BACKEND_ENABLED = false;
+let gazeBackend = BRIDGE_BACKEND_ENABLED
+  ? (localStorage.getItem('senseease_gaze_backend') || 'mediapipe')
+  : 'mediapipe';
+// Clear any stale persisted choice from a prior session that had the bridge
+// enabled — otherwise the boot guard would fire pointlessly.
+if (!BRIDGE_BACKEND_ENABLED && localStorage.getItem('senseease_gaze_backend')) {
+  localStorage.removeItem('senseease_gaze_backend');
+}
 
 function setLuxChip(text) { if (luxChip) luxChip.innerText = text; }
 
@@ -1815,6 +1829,7 @@ function _formatBridgeHuman(hello) {
 }
 
 async function probeBridge({ silent = false } = {}) {
+  if (!BRIDGE_BACKEND_ENABLED) return;
   if (typeof OpenVinoBridgeTracker?.probe !== 'function') return;
   if (!silent) setBridgeHint('Probing OpenVINO bridge…');
   // Three-pass exponential probe (1.5s → 3s → 5s). The single 1.5s window

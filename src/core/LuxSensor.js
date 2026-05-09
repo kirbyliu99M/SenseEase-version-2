@@ -20,26 +20,25 @@ export class LuxSensor {
   async start() {
     // Path 1 — hardware sensor (Chrome desktop with --enable-generic-sensor-extra-classes
     // or Android Chrome). Requires HTTPS or localhost.
+    //
+    // The constructor + .start() can succeed even when no real sensor is
+    // wired up (Chrome ships the API with the flag enabled, but the OS may
+    // not surface a device). Symptom: 'reading' never fires, illuminance
+    // stays undefined, but our code thought the sensor was live → warmth
+    // never updated. Probe with a 2 s timeout and abandon to webcam fallback
+    // if no reading arrives.
     if (typeof window !== 'undefined' && 'AmbientLightSensor' in window) {
-      try {
-        this._sensor = new window.AmbientLightSensor({ frequency: 2 });
-        this._sensor.addEventListener('reading', () => {
-          const lux = this._sensor.illuminance ?? 0;
-          this._lastLux = lux;
-          // Map 0-1000 lux → 1.0 (very dim) - 0.0 (bright office). Caps at 1000+.
-          const warmth = 1 - Math.min(1, lux / 1000);
-          this.onWarmthChange(warmth);
-        });
-        this._sensor.addEventListener('error', (e) => {
-          console.warn('[LuxSensor] AmbientLightSensor error:', e?.error?.message || e);
-        });
-        this._sensor.start();
+      const sensorWorks = await this._tryAmbientLightSensor(2000);
+      if (sensorWorks) {
         this._sourceLabel = 'AmbientLightSensor';
         return this._sourceLabel;
-      } catch (e) {
-        console.warn('[LuxSensor] AmbientLightSensor unavailable:', e?.message);
+      }
+      // Probe failed — clean up half-initialized state and fall through.
+      if (this._sensor) {
+        try { this._sensor.stop(); } catch {}
         this._sensor = null;
       }
+      console.info('[LuxSensor] AmbientLightSensor present but silent — falling back to webcam frame luminance');
     }
 
     // Path 2 — webcam frame luminance sampling (universal fallback).
@@ -77,6 +76,51 @@ export class LuxSensor {
     // Neither path available — caller should keep the simulated timeline running.
     this._sourceLabel = 'simulated';
     return this._sourceLabel;
+  }
+
+  // Returns true iff the sensor produced at least one reading within
+  // probeMs. Wires up the long-lived 'reading' handler on success; cleans
+  // up on failure. Real-world Chrome behavior on machines without an
+  // ambient light sensor: constructor + start() succeed silently, no
+  // events ever fire — hence the explicit probe.
+  async _tryAmbientLightSensor(probeMs) {
+    try {
+      this._sensor = new window.AmbientLightSensor({ frequency: 2 });
+    } catch (e) {
+      console.warn('[LuxSensor] AmbientLightSensor constructor failed:', e?.message);
+      return false;
+    }
+
+    let firstReadingResolve;
+    const firstReading = new Promise((r) => { firstReadingResolve = r; });
+    let resolved = false;
+    const onReading = () => {
+      const lux = this._sensor.illuminance;
+      if (!Number.isFinite(lux)) return;
+      this._lastLux = lux;
+      const warmth = 1 - Math.min(1, lux / 1000);
+      this.onWarmthChange(warmth);
+      if (!resolved) { resolved = true; firstReadingResolve(true); }
+    };
+    const onError = (e) => {
+      console.warn('[LuxSensor] AmbientLightSensor error:', e?.error?.message || e);
+      if (!resolved) { resolved = true; firstReadingResolve(false); }
+    };
+
+    this._sensor.addEventListener('reading', onReading);
+    this._sensor.addEventListener('error', onError);
+    try { this._sensor.start(); }
+    catch (e) {
+      console.warn('[LuxSensor] AmbientLightSensor.start() failed:', e?.message);
+      return false;
+    }
+
+    // Wait up to probeMs for the first reading.
+    const ok = await Promise.race([
+      firstReading,
+      new Promise((r) => setTimeout(() => r(false), probeMs)),
+    ]);
+    return ok;
   }
 
   stop() {

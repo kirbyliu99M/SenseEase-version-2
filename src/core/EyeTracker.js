@@ -36,6 +36,13 @@ export class EyeTracker {
     this._intentTarget = null;
     this._intentSince = 0;
     this._glide = null;
+    // Anchor + leash: shader visually rests at _anchor. Gaze movement within
+    // ANCHOR_RADIUS_PX of _anchor leaves it untouched (no jitter fatigue).
+    // Once gaze leaves the zone, the anchor smoothly catches up — the
+    // further/longer it's been escaping, the faster it pulls.
+    this._anchor = null;
+    this._anchorEscapeMs = 0; // accumulated time gaze has been outside the leash
+    this.ANCHOR_RADIUS_PX = 90; // hold radius — ~1° visual angle at desk distance
     this._aiAssist = {
       enabled: true,
       x: 0,
@@ -79,6 +86,8 @@ export class EyeTracker {
       this._filtered = { ...clamped };
       this._output = { ...clamped };
       this._glide = { ...clamped };
+      this._anchor = { ...clamped };
+      this._anchorEscapeMs = 0;
       this.gazeOverride = { ...clamped };
       this._zoneStable = this._zoneFromPoint(clamped.x, clamped.y);
       this._zonePending = this._zoneStable;
@@ -170,61 +179,77 @@ export class EyeTracker {
       const magneticX = _lerp(this._filtered.x, zoneCenter.x, magnet);
       const magneticY = _lerp(this._filtered.y, zoneCenter.y, magnet);
       const distToOutput = Math.hypot(magneticX - this._output.x, magneticY - this._output.y);
-      // Larger detection range — mask is allowed to follow gaze loosely from
-      // further out without an "intent commit" gate. The user explicitly asked
-      // for "shader follows the eye approximately" rather than pixel-tight.
-      const holdRadius = 180;       // was 120
-      const commitRadius = 260;     // was 170
-      // Faster response: shorter dwell before committing a move. Smoothness
-      // is preserved by the glide alpha lerp at the end of the function.
-      const moveConfirmMs = speed > 700 ? 110 : 180; // was 190 / 300
 
-      if (distToOutput < holdRadius) {
-        this._intentTarget = null;
-        this._intentSince = 0;
-        // Higher follow-through inside hold radius so micro-saccades get
-        // tracked. Glide pass at the end smooths it visually.
-        this._output.x = _lerp(this._output.x, magneticX, 0.018); // was 0.006
-        this._output.y = _lerp(this._output.y, magneticY, 0.018);
-      } else if (distToOutput < commitRadius) {
-        this._intentTarget = null;
-        this._intentSince = 0;
-        this._output.x = _lerp(this._output.x, magneticX, 0.045); // was 0.016
-        this._output.y = _lerp(this._output.y, magneticY, 0.045);
-      } else {
-        const sameIntent = this._intentTarget
-          && Math.hypot(this._intentTarget.x - magneticX, this._intentTarget.y - magneticY) < 110; // was 82
-        if (!sameIntent) {
-          this._intentTarget = { x: magneticX, y: magneticY };
-          this._intentSince = now;
-        }
-
-        const intentMs = now - this._intentSince;
-        if (intentMs >= moveConfirmMs) {
-          // Stronger commit alpha — once we've decided to move, get there.
-          const outputAlpha = speedRatio > 0.45 ? 0.18 : 0.10; // was 0.11 / 0.06
-          this._output.x = _lerp(this._output.x, magneticX, outputAlpha);
-          this._output.y = _lerp(this._output.y, magneticY, outputAlpha);
-        }
-      }
+      // Continuous distance-based alpha replaces the previous banded
+      // (hold / commit / intent-gate) output controller. Bands had two
+      // problems: (a) crossing a boundary visibly stepped the mask because
+      // alpha jumped 3-5×, (b) the intent-gate added 110-180 ms of latency
+      // before any far movement registered.
+      //
+      // The smooth curve below:
+      //   - Idle smoothness: tiny distance → small alpha (~0.022)
+      //   - Linear ramp:     ~250 px → ~0.11
+      //   - Saccade catchup: 600+ px → caps at 0.32
+      // baseAlpha is scaled by quality so flickery low-quality samples
+      // contribute less. The intent gate is gone; the output filter +
+      // glide pass below already provide enough smoothing.
+      const distRatio = _clamp(distToOutput / 600, 0, 1);
+      const qualityScale = 0.6 + q * 0.4;
+      const outputAlpha = (0.022 + distRatio * distRatio * 0.30) * qualityScale;
+      this._intentTarget = null;
+      this._intentSince = 0;
+      this._output.x = _lerp(this._output.x, magneticX, outputAlpha);
+      this._output.y = _lerp(this._output.y, magneticY, outputAlpha);
     }
 
     const aiOutput = this._runAiAssist(this._output.x, this._output.y, q, dt);
     if (!this._glide) this._glide = { ...aiOutput };
-    // Glide alpha tuned to chase the (now more responsive) output without
-    // losing smoothness. Higher floor (0.085) means small movements reach
-    // the screen quickly; high-speed cap (0.22) keeps saccades tracking.
+    // Continuous glide alpha — replaces the previous 3-band step function
+    // that produced visible "judder" when crossing band boundaries during
+    // smooth pursuit. Quadratic distance term keeps idle smooth (≈0.06)
+    // while saccade-distance jumps reach 0.26 quickly.
     const glideDist = Math.hypot(aiOutput.x - this._glide.x, aiOutput.y - this._glide.y);
-    let glideAlpha;
-    if (speed > 800 || glideDist > 60)      glideAlpha = 0.22;
-    else if (speed > 300 || glideDist > 20) glideAlpha = 0.14;
-    else                                     glideAlpha = 0.085;
+    const glideRatio = _clamp(glideDist / 100, 0, 1);
+    const speedRatio2 = _clamp(speed / 800, 0, 1);
+    const glideAlpha = 0.06 + Math.max(glideRatio * glideRatio, speedRatio2) * 0.20;
     this._glide.x = _lerp(this._glide.x, aiOutput.x, glideAlpha);
     this._glide.y = _lerp(this._glide.y, aiOutput.y, glideAlpha);
 
+    // Anchor + leash. The shader-visible position (this.gazeOverride) is the
+    // *anchor*, not the live glide. As long as glide stays within
+    // ANCHOR_RADIUS_PX of the anchor, the anchor doesn't move at all — so
+    // small natural saccades / tracker jitter don't drag the mask around.
+    // Once glide escapes the leash, the anchor catches up with a soft
+    // ease-out: the longer + further glide has been outside, the faster
+    // the catch-up alpha. When glide returns inside the leash, the anchor
+    // freezes wherever it last reached, and escape-time decays.
+    if (!this._anchor) this._anchor = { x: this._glide.x, y: this._glide.y };
+    const anchorDx = this._glide.x - this._anchor.x;
+    const anchorDy = this._glide.y - this._anchor.y;
+    const anchorDist = Math.hypot(anchorDx, anchorDy);
+    const dtMs = Math.max(1, dt * 1000);
+
+    if (anchorDist > this.ANCHOR_RADIUS_PX) {
+      // Outside leash — accumulate escape time and pull anchor toward glide.
+      this._anchorEscapeMs += dtMs;
+      const escapeDist = anchorDist - this.ANCHOR_RADIUS_PX;
+      // alpha grows with both (a) how far past the leash we are and
+      // (b) how long we've been past it. Capped so a sudden far jump
+      // doesn't snap; bounded so a slow drift still eventually catches up.
+      const distFactor = _clamp(escapeDist / 220, 0, 1);
+      const timeFactor = _clamp(this._anchorEscapeMs / 240, 0, 1);
+      const anchorAlpha = 0.014 + Math.max(distFactor * distFactor, timeFactor) * 0.10;
+      this._anchor.x += anchorDx * anchorAlpha;
+      this._anchor.y += anchorDy * anchorAlpha;
+    } else {
+      // Inside leash — freeze anchor, decay escape timer so a brief
+      // excursion doesn't bias the next escape's alpha curve.
+      this._anchorEscapeMs = Math.max(0, this._anchorEscapeMs - dtMs * 1.5);
+    }
+
     this.gazeOverride = {
-      x: _clamp(this._glide.x, 0, window.innerWidth),
-      y: _clamp(this._glide.y, 0, window.innerHeight),
+      x: _clamp(this._anchor.x, 0, window.innerWidth),
+      y: _clamp(this._anchor.y, 0, window.innerHeight),
     };
 
     this._raw = accepted;
@@ -262,6 +287,8 @@ export class EyeTracker {
     this._intentTarget = null;
     this._intentSince = 0;
     this._glide = null;
+    this._anchor = null;
+    this._anchorEscapeMs = 0;
     this._aiAssist.ready = false;
     this._aiAssist.vx = 0;
     this._aiAssist.vy = 0;
@@ -297,9 +324,15 @@ export class EyeTracker {
         // Very gentle re-center (0.005 instead of 0.02) so a brief MediaPipe
         // drop at the edge of frame doesn't snap gaze back to center. After
         // 1.5s of silence we *suggest* the center but the user can still
-        // saccade out without needing a recalibrate.
+        // saccade out without needing a recalibrate. Also drift the anchor
+        // toward center so the next live sample's leash is computed against
+        // the recenter, not the stale corner.
         this.gazeOverride.x = _lerp(this.gazeOverride.x, this.screenCenterX, 0.005);
         this.gazeOverride.y = _lerp(this.gazeOverride.y, this.screenCenterY, 0.005);
+        if (this._anchor) {
+          this._anchor.x = _lerp(this._anchor.x, this.screenCenterX, 0.005);
+          this._anchor.y = _lerp(this._anchor.y, this.screenCenterY, 0.005);
+        }
       }
     }
 

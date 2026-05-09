@@ -1,8 +1,19 @@
 # OpenVINO Models — Bundled via Git LFS
 
 This folder ships the OpenVINO IR (`.xml` + `.bin`) files for the gaze
-bridge. Both **FP16** and **FP32** precisions are bundled so the bridge
-can pick the right weights for whichever device wins the AUTO chain:
+bridge. Two pipelines are supported:
+
+| Pipeline       | Models needed | What it tracks |
+|----------------|---------------|----------------|
+| **eye-gaze** ⭐ | face + landmarks + head-pose + gaze-estimation | Real eye direction (NPU/GPU/CPU) |
+| head-pose      | face + head-pose only | Head turn (fallback when gaze models absent) |
+
+If only the first two are present the bridge silently uses head-pose. Drop
+landmarks-regression-retail-0009 + gaze-estimation-adas-0002 alongside to
+unlock the full gaze pipeline.
+
+Both **FP16** and **FP32** precisions are bundled so the bridge can pick
+the right weights for whichever device wins the AUTO chain:
 
 | Device picked  | Precision used | Why |
 |----------------|---------------|-----|
@@ -74,10 +85,42 @@ git clone https://github.com/kirbyliu99M/SenseEase-version-2.git
 
 Use Intel's `omz_downloader` to grab both precisions in one go:
 
+### Option A — direct download (no Python required)
+
+The simplest path; just `Invoke-WebRequest` from Intel's mirror. This
+downloads ALL FOUR models for the full eye-gaze pipeline:
+
 ```powershell
+$base = "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1"
+New-Item -ItemType Directory -Force ./models/FP16, ./models/FP32 | Out-Null
+$modelList = "face-detection-adas-0001","head-pose-estimation-adas-0001","landmarks-regression-retail-0009","gaze-estimation-adas-0002"
+foreach ($model in $modelList) {
+  foreach ($prec in "FP16","FP32") {
+    foreach ($ext in "xml","bin") {
+      Invoke-WebRequest "$base/$model/$prec/$model.$ext" -OutFile "./models/$prec/$model.$ext"
+    }
+  }
+}
+```
+
+### Option B — `omz_downloader` (Python required)
+
+If you've got Python and want managed downloads with checksum validation:
+
+```powershell
+# Windows: use the `py` launcher; bare `python` may hit MS Store stub
+py -m pip install openvino-dev
+foreach ($m in "face-detection-adas-0001","head-pose-estimation-adas-0001","landmarks-regression-retail-0009","gaze-estimation-adas-0002") {
+  py -m openvino.tools.downloader.downloader --name $m --output_dir ./models --precisions FP16,FP32
+}
+```
+
+```bash
+# macOS / Linux
 pip install openvino-dev
-omz_downloader --name face-detection-adas-0001 --output_dir ./models --precisions FP16,FP32
-omz_downloader --name head-pose-estimation-adas-0001 --output_dir ./models --precisions FP16,FP32
+for m in face-detection-adas-0001 head-pose-estimation-adas-0001 landmarks-regression-retail-0009 gaze-estimation-adas-0002; do
+  omz_downloader --name $m --output_dir ./models --precisions FP16,FP32
+done
 ```
 
 This produces Layout 2 (`models/intel/.../FP16/...`), which the bridge reads
