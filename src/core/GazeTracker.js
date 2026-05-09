@@ -314,15 +314,22 @@ export class GazeTracker {
   _applyMapping(sample) {
     if (!this._mapping) return this._applyFallbackMapping(sample);
 
-    const f = _basis(sample.x, sample.y);
+    // Quadratic basis is unstable when sample.x/y exceed the calibration
+    // range (typical iris-offset is ±0.05; corner gaze can spike past ±0.08).
+    // The x² and y² terms then amplify the error several-fold, which used to
+    // throw corner predictions off-screen. Clamp the *input* to a safe band
+    // before evaluation so extrapolation degrades gracefully.
+    const sx = _clamp(sample.x, -0.07, 0.07);
+    const sy = _clamp(sample.y, -0.06, 0.06);
+    const f = _basis(sx, sy);
     const x = _dot(this._mapping.wx, f);
     const y = _dot(this._mapping.wy, f);
 
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
 
     return {
-      x: _clamp(x, -window.innerWidth * 0.25, window.innerWidth * 1.25),
-      y: _clamp(y, -window.innerHeight * 0.25, window.innerHeight * 1.25),
+      x: _clamp(x, -window.innerWidth * 0.10, window.innerWidth * 1.10),
+      y: _clamp(y, -window.innerHeight * 0.10, window.innerHeight * 1.10),
     };
   }
 

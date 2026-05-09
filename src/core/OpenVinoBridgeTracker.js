@@ -120,12 +120,15 @@ export class OpenVinoBridgeTracker {
     await new Promise((resolve, reject) => {
       let done = false;
       const ws = new WebSocket(this.wsUrl);
+      // 5s instead of 2.5s — OpenVINO model compile + NPU init can take
+      // 5-15s on cold boot. The previous 2.5s window declared the bridge
+      // unreachable while it was still legitimately starting.
       const timeout = setTimeout(() => {
         if (done) return;
         done = true;
         try { ws.close(); } catch {}
         reject(new Error(`OpenVINO bridge timeout: ${this.wsUrl}`));
-      }, 2500);
+      }, 5000);
 
       ws.onopen = () => {
         if (done) return;
@@ -134,7 +137,10 @@ export class OpenVinoBridgeTracker {
         this._ws = ws;
         ws.onmessage = (ev) => this._onMessage(ev);
         ws.onerror = () => { this._lastErr = 'OpenVINO bridge socket error'; };
-        ws.onclose = () => {};
+        // Auto-reconnect on transient drops. The previous empty handler
+        // silently abandoned the connection on any close, so a momentary
+        // server hiccup permanently downgraded the demo to MediaPipe.
+        ws.onclose = (ev) => this._scheduleReconnect(ev);
         resolve();
       };
 
@@ -145,6 +151,32 @@ export class OpenVinoBridgeTracker {
         reject(new Error(`OpenVINO bridge unreachable: ${this.wsUrl}`));
       };
     });
+  }
+
+  _scheduleReconnect(closeEvent) {
+    if (!this._isReady) return; // user-initiated stop()
+    this._ws = null;
+    this._reconnectAttempts = (this._reconnectAttempts || 0) + 1;
+    if (this._reconnectAttempts > 3) {
+      this._lastErr = `Bridge dropped after ${this._reconnectAttempts - 1} reconnect attempts`;
+      console.warn('[OpenVinoBridge]', this._lastErr);
+      return;
+    }
+    // Exponential backoff: 1s, 2s, 5s.
+    const delay = [1000, 2000, 5000][this._reconnectAttempts - 1];
+    console.info(
+      `[OpenVinoBridge] reconnecting in ${delay}ms (attempt ${this._reconnectAttempts}/3, close=${closeEvent?.code || 'n/a'})`,
+    );
+    setTimeout(async () => {
+      if (!this._isReady) return;
+      try {
+        await this._connect();
+        this._reconnectAttempts = 0;
+        console.info('[OpenVinoBridge] reconnected');
+      } catch (e) {
+        this._lastErr = e?.message || String(e);
+      }
+    }, delay);
   }
 
   _ensureCanvas() {
@@ -183,6 +215,8 @@ export class OpenVinoBridgeTracker {
           device: msg.device || null,
           faceModel: msg.face_model || null,
           headposeModel: msg.headpose_model || null,
+          precision: msg.precision || null,
+          reason: msg.reason || null,
           protocol: msg.protocol || null,
         };
         // Loud, friendly confirmation in DevTools — useful at the booth so

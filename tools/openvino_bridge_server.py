@@ -35,12 +35,156 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 import websockets
-from websockets.server import WebSocketServerProtocol
+
+# websockets >=12 moved WebSocketServerProtocol out of `.server` into
+# `.legacy.server`. Try both paths so the bridge runs on a wider range of
+# host installs without forcing a downgrade.
+try:
+    from websockets.server import WebSocketServerProtocol  # websockets <12
+except ImportError:
+    try:
+        from websockets.legacy.server import WebSocketServerProtocol  # websockets >=12
+    except ImportError:
+        WebSocketServerProtocol = object  # last-resort: type hint only
 
 try:
     from openvino.runtime import Core  # type: ignore
 except Exception:
     Core = None
+
+
+# Bundled-model search path. Lets users `python openvino_bridge_server.py`
+# without --face-model arguments by dropping the IR files at this relative
+# location. The repo can ship them in `models/` so first-time users get
+# OpenVINO acceleration without reading the protocol doc.
+_BUNDLED_MODELS_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "models",
+)
+
+
+_FACE_CANDIDATES = [
+    "face-detection-adas-0001.xml",
+    "face-detection-retail-0004.xml",
+]
+_HEAD_CANDIDATES = [
+    "head-pose-estimation-adas-0001.xml",
+]
+
+
+def _find_in_dir(dir_path: str, candidates: list) -> Optional[str]:
+    """Return the first existing candidate filename in dir_path, else None."""
+    if not os.path.isdir(dir_path):
+        return None
+    for name in candidates:
+        p = os.path.join(dir_path, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _autodiscover_models() -> dict:
+    """Look for OpenVINO IR pairs in the repo's models/ folder, grouped by
+    precision. Supports three layout styles, in order of preference:
+
+    1) Per-precision subfolders:
+         models/FP16/face-detection-adas-0001.xml
+         models/FP32/head-pose-estimation-adas-0001.xml
+
+    2) omz_downloader native nesting (kept verbatim, no manual flatten):
+         models/intel/face-detection-adas-0001/FP16/...
+         models/intel/head-pose-estimation-adas-0001/FP32/...
+
+    3) Flat (legacy):
+         models/face-detection-adas-0001.xml
+         models/head-pose-estimation-adas-0001.xml
+       — assumed FP16 if precision is unknown.
+
+    Returns dict {precision: (face_xml, head_xml)}. Empty dict means nothing
+    was found.
+    """
+    result: dict = {}
+    if not os.path.isdir(_BUNDLED_MODELS_DIR):
+        return result
+
+    # Style 1: per-precision subfolders directly under models/
+    for precision in ("FP16", "FP32", "FP16-INT8"):
+        sub = os.path.join(_BUNDLED_MODELS_DIR, precision)
+        face = _find_in_dir(sub, _FACE_CANDIDATES)
+        head = _find_in_dir(sub, _HEAD_CANDIDATES)
+        if face and head:
+            result[precision] = (face, head)
+
+    # Style 2: omz_downloader nesting (models/intel/<model>/<precision>/...)
+    intel_dir = os.path.join(_BUNDLED_MODELS_DIR, "intel")
+    if os.path.isdir(intel_dir):
+        for precision in ("FP16", "FP32", "FP16-INT8"):
+            if precision in result:
+                continue  # style 1 already won
+            face = None
+            head = None
+            for face_name in _FACE_CANDIDATES:
+                base = face_name.replace(".xml", "")
+                cand = os.path.join(intel_dir, base, precision, face_name)
+                if os.path.isfile(cand):
+                    face = cand
+                    break
+            for head_name in _HEAD_CANDIDATES:
+                base = head_name.replace(".xml", "")
+                cand = os.path.join(intel_dir, base, precision, head_name)
+                if os.path.isfile(cand):
+                    head = cand
+                    break
+            if face and head:
+                result[precision] = (face, head)
+
+    # Style 3: flat fallback. Treat as FP16 unless we already discovered one.
+    if "FP16" not in result and "FP32" not in result:
+        face = _find_in_dir(_BUNDLED_MODELS_DIR, _FACE_CANDIDATES)
+        head = _find_in_dir(_BUNDLED_MODELS_DIR, _HEAD_CANDIDATES)
+        if face and head:
+            result["FP16"] = (face, head)
+
+    return result
+
+
+def _pick_precision(available_precisions: list, ov_devices: list, device_chain: list) -> str:
+    """Pick the best available precision given the devices we plan to try.
+
+    Rules:
+      - NPU is the first usable device in the chain → prefer FP16 (NPU spec).
+      - GPU is the first usable device in the chain → prefer FP32 (matches
+        Intel iGPU/Arc behavior; FP16 still works but FP32 has wider op support).
+      - CPU first → prefer FP32.
+      - INT8 is opt-in: only used if explicitly the only option available.
+    """
+    if not available_precisions:
+        return ""
+
+    # Resolve the first device that's actually available.
+    first_runnable = None
+    avail = set(d.upper() for d in ov_devices)
+    for d in device_chain:
+        if d.upper() in avail:
+            first_runnable = d.upper()
+            break
+
+    if first_runnable == "NPU":
+        for p in ("FP16", "FP16-INT8", "FP32"):
+            if p in available_precisions:
+                return p
+    if first_runnable in ("GPU", "CPU"):
+        for p in ("FP32", "FP16", "FP16-INT8"):
+            if p in available_precisions:
+                return p
+
+    # No clear device match — fall back to whatever is present, FP16 first
+    # (smaller, runs almost everywhere).
+    for p in ("FP16", "FP32", "FP16-INT8"):
+        if p in available_precisions:
+            return p
+    return list(available_precisions)[0]
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -147,6 +291,8 @@ class OpenVinoHeadPoseBackend:
         # live latency chip in the browser UI.
         self.last_infer_ms = 0.0
         self.ema_infer_ms = 0.0
+        self.face_model_path = face_model_xml
+        self.head_model_path = head_model_xml
         self.face_model_name = os.path.basename(face_model_xml)
         self.head_model_name = os.path.basename(head_model_xml)
 
@@ -241,11 +387,19 @@ class OpenVinoHeadPoseBackend:
         return x, y, quality
 
     def describe(self) -> dict:
+        # Infer precision from the loaded model path. Cheap and reliable —
+        # avoids parsing the IR XML at hello time.
+        precision = "?"
+        for tag in ("FP16-INT8", "FP16", "FP32"):
+            if tag in (self.face_model_path or "").upper():
+                precision = tag
+                break
         return {
             "type": "openvino",
             "device": self.actual_device,
             "face_model": self.face_model_name,
             "headpose_model": self.head_model_name,
+            "precision": precision,
         }
 
 
@@ -262,7 +416,11 @@ class OpenCvFaceCenterBackend:
         logging.info("OpenCV fallback backend ready (no OpenVINO models loaded)")
 
     def describe(self) -> dict:
-        return {"type": "opencv", "device": self.actual_device}
+        return {
+            "type": "opencv",
+            "device": self.actual_device,
+            "reason": "no OpenVINO models supplied",
+        }
 
     def estimate(self, frame_bgr: np.ndarray) -> Optional[Tuple[float, float, float]]:
         infer_start = time.perf_counter()
@@ -344,6 +502,8 @@ def _backend_hello(backend) -> dict:
         "device": desc.get("device", "unknown"),
         "face_model": desc.get("face_model"),
         "headpose_model": desc.get("headpose_model"),
+        "precision": desc.get("precision"),  # FP16 / FP32 / FP16-INT8
+        "reason": desc.get("reason"),        # populated when running fallback
         "ts": time.time(),
     }
 
@@ -400,12 +560,63 @@ def _parse_device_chain(s: str) -> list:
 
 
 def make_backend(args):
-    if args.face_model and args.headpose_model:
+    face_xml = args.face_model
+    head_xml = args.headpose_model
+    chain = _parse_device_chain(args.device)
+
+    # Query OpenVINO devices once up-front so the precision picker can match
+    # weights to the device the chain will actually pick at compile time.
+    ov_devices = []
+    if Core is not None:
         try:
-            chain = _parse_device_chain(args.device)
-            return OpenVinoHeadPoseBackend(args.face_model, args.headpose_model, chain)
+            ov_devices = sorted(Core().available_devices)
+            logging.info("OpenVINO available_devices = %s", ov_devices)
+            if "NPU" in chain and "NPU" not in ov_devices:
+                logging.warning(
+                    "NPU requested but not in available_devices. "
+                    "Check Intel NPU driver install: "
+                    "https://www.intel.com/content/www/us/en/support/products/229751/processors.html"
+                )
+        except Exception as e:
+            logging.warning("Could not query OpenVINO devices: %s", e)
+
+    # If user passed explicit paths, respect them verbatim. Otherwise auto-
+    # discover and pick the precision that matches the planned device.
+    if not face_xml or not head_xml:
+        bundled = _autodiscover_models()
+        if bundled:
+            picked = _pick_precision(list(bundled.keys()), ov_devices, chain)
+            if picked and picked in bundled:
+                f, h = bundled[picked]
+                face_xml = face_xml or f
+                head_xml = head_xml or h
+                logging.info(
+                    "Auto-discovered bundled models | precision=%s (chosen for chain=%s, devices=%s) "
+                    "face=%s head=%s",
+                    picked, chain, ov_devices, face_xml, head_xml,
+                )
+            else:
+                logging.warning(
+                    "Bundled models found but no precision matched device chain %s "
+                    "(available precisions: %s).", chain, list(bundled.keys()),
+                )
+
+    if face_xml and head_xml:
+        try:
+            return OpenVinoHeadPoseBackend(face_xml, head_xml, chain)
         except Exception as e:
             logging.warning("OpenVINO init failed, fallback to OpenCV: %s", e)
+    else:
+        # Loud, single-line warning so booth presenters know why they're seeing
+        # the OpenCV pill instead of the NPU pill. The previous silence here
+        # was the source of the "OpenVINO Bridge claims acceleration that
+        # isn't running" complaint in the May 9 executive summary.
+        logging.warning(
+            "No OpenVINO models supplied (--face-model + --headpose-model) "
+            "and none found under %s — using OpenCV Haar cascade fallback. "
+            "The browser will display 'OpenCV (no AI accel)'.",
+            os.path.abspath(_BUNDLED_MODELS_DIR),
+        )
     return OpenCvFaceCenterBackend()
 
 

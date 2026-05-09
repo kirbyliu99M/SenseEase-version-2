@@ -19,6 +19,9 @@ __pycache__/
 # Large video files — hosted externally (Google Drive)
 *.mp4
 
+# OpenVINO IR weights are tracked via Git LFS (see .gitattributes), not
+# ignored. Booth machines that clone the repo get the models out of the box.
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

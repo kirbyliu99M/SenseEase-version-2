@@ -1,7 +1,9 @@
 // Single source of truth for "no fresh gaze sample" timeout. extractFeatures
-// re-centers earlier (75% of this) but mode/banners flip at the full window.
-export const STALE_LOST_MS = 450;
-export const STALE_RECENTER_MS = STALE_LOST_MS * 0.78; // ~350ms
+// re-centers only after a much longer window so brief MediaPipe drops at the
+// edge of frame don't yank gaze back to center (the "must recalibrate to look
+// at corner again" symptom).
+export const STALE_LOST_MS = 450;          // mode/banner flip
+export const STALE_RECENTER_MS = 1500;     // start re-centering only after 1.5s of silence
 
 export class EyeTracker {
   constructor() {
@@ -155,7 +157,15 @@ export class EyeTracker {
       // and contributed to the "calibration looks off after pass" complaint.
       // Calibrated mapping is good enough that we can trust filtered position
       // more than the 3×3 zone grid.
-      const magnet = (1 - speedRatio) * (0.04 + q * 0.05);
+      // Edge & corner zones additionally suppress the magnet entirely. With
+      // anchors now at 5%/95%, a corner zone tugs gaze *toward* the corner
+      // which is correct, but pulling tilts the mask into the chrome the
+      // moment the user's eye drifts a few pixels back — the "失焦" symptom.
+      const isEdgeZone = (this._zoneStable !== null
+        && this._zoneStable !== 4 // center
+        && Number.isFinite(this._zoneStable));
+      const magnetBase = isEdgeZone ? 0 : (0.04 + q * 0.05);
+      const magnet = (1 - speedRatio) * magnetBase;
 
       const magneticX = _lerp(this._filtered.x, zoneCenter.x, magnet);
       const magneticY = _lerp(this._filtered.y, zoneCenter.y, magnet);
@@ -284,9 +294,12 @@ export class EyeTracker {
       const staleMs = performance.now() - this._lastRawTs;
       if (staleMs > STALE_RECENTER_MS) {
         this._mode = 'lost';
-        // If signal drops, gently re-center instead of freezing forever.
-        this.gazeOverride.x = _lerp(this.gazeOverride.x, this.screenCenterX, 0.02);
-        this.gazeOverride.y = _lerp(this.gazeOverride.y, this.screenCenterY, 0.02);
+        // Very gentle re-center (0.005 instead of 0.02) so a brief MediaPipe
+        // drop at the edge of frame doesn't snap gaze back to center. After
+        // 1.5s of silence we *suggest* the center but the user can still
+        // saccade out without needing a recalibrate.
+        this.gazeOverride.x = _lerp(this.gazeOverride.x, this.screenCenterX, 0.005);
+        this.gazeOverride.y = _lerp(this.gazeOverride.y, this.screenCenterY, 0.005);
       }
     }
 
@@ -330,8 +343,11 @@ export class EyeTracker {
     }
     const row = Math.floor(zoneIdx / 3);
     const col = zoneIdx % 3;
-    const xAnchors = [0.1, 0.5, 0.9];
-    const yAnchors = [0.1, 0.5, 0.9];
+    // Edge zones now anchor at the actual edge (5%/95%) instead of 10%/90%.
+    // Previously a gaze at 5% sat 64px inside the holdRadius (180px) so the
+    // mask refused to follow into the corner — the "sticking" symptom.
+    const xAnchors = [0.05, 0.5, 0.95];
+    const yAnchors = [0.05, 0.5, 0.95];
     return {
       x: xAnchors[col] * window.innerWidth,
       y: yAnchors[row] * window.innerHeight,
@@ -396,13 +412,25 @@ export class EyeTracker {
     st.vx = _lerp(st.vx, (kVel * rx) / Math.max(dt, 1 / 120), 0.42);
     st.vy = _lerp(st.vy, (kVel * ry) / Math.max(dt, 1 / 120), 0.42);
 
+    // Edge guard: when gaze sits in the outer 15% of the screen, freeze drift
+    // bias accumulation. The prior unconditional drift learn would lock in a
+    // corner-direction bias during long fixations on the edge of the video
+    // frame, which then yanked the mask the wrong way the moment the user's
+    // gaze returned to center. Decay any accumulated bias gently in this band.
+    const nx = x / Math.max(1, window.innerWidth);
+    const ny = y / Math.max(1, window.innerHeight);
+    const onEdgeBand = nx < 0.15 || nx > 0.85 || ny < 0.15 || ny > 0.85;
+
     const driftLike = residual < 14 && Math.hypot(st.vx, st.vy) < 90;
-    if (driftLike) {
+    if (driftLike && !onEdgeBand) {
       st.biasX = _lerp(st.biasX, st.x - x, 0.05);
       st.biasY = _lerp(st.biasY, st.y - y, 0.05);
     } else {
-      st.biasX = _lerp(st.biasX, 0, 0.02);
-      st.biasY = _lerp(st.biasY, 0, 0.02);
+      // Faster decay on edge band so any pre-existing bias dissipates before
+      // the next saccade lands.
+      const decay = onEdgeBand ? 0.06 : 0.02;
+      st.biasX = _lerp(st.biasX, 0, decay);
+      st.biasY = _lerp(st.biasY, 0, decay);
     }
 
     return {

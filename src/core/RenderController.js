@@ -156,22 +156,27 @@ export class RenderController {
           gazeY = features.gazeOriginY - rect.top;
         }
 
-        // Confine gaze to the demo target (Main Scenario video) bounds.
+        // Confine the *render position only* to the demo target bounds. The
+        // upstream eyeTracker.gazeOverride must NOT be mutated here — it
+        // would leak our clamp back into the gaze pipeline and cause the
+        // "stuck on the edge" symptom: every subsequent frame would see gaze
+        // already at the edge and the mask would refuse to leave it.
         // - Inside rect: pass through unchanged.
-        // - Slightly outside (within tolerance): clamp to nearest edge so the
-        //   mask sticks to the video boundary instead of drifting onto chrome.
-        // - Far outside: fade the mask out entirely so it stops following an
-        //   off-screen gaze (the user is no longer looking at the video).
+        // - Slightly outside: clamp render position to nearest edge.
+        // - Far outside: fade intensity, but don't touch eyeTracker state.
         const overshootX = gazeX < 0 ? -gazeX : gazeX > rect.width ? gazeX - rect.width : 0;
         const overshootY = gazeY < 0 ? -gazeY : gazeY > rect.height ? gazeY - rect.height : 0;
         const overshoot = Math.max(overshootX, overshootY);
         const tolerancePx = Math.max(40, Math.min(rect.width, rect.height) * 0.18);
+        let renderGazeX = gazeX;
+        let renderGazeY = gazeY;
         if (overshoot > 0) {
-          gazeX = Math.max(0, Math.min(rect.width, gazeX));
-          gazeY = Math.max(0, Math.min(rect.height, gazeY));
+          renderGazeX = Math.max(0, Math.min(rect.width, gazeX));
+          renderGazeY = Math.max(0, Math.min(rect.height, gazeY));
         }
+        gazeX = renderGazeX;
+        gazeY = renderGazeY;
         if (overshoot > tolerancePx) {
-          // Far overshoot — collapse intensity and skip this frame's draw.
           const fade = Math.max(0, 1 - (overshoot - tolerancePx) / tolerancePx);
           this.currentIntensity *= fade;
           if (this.currentIntensity <= HIDE_THRESHOLD) {

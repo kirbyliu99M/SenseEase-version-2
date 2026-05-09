@@ -1457,10 +1457,13 @@ function _pillStateFromTracker() {
     if (remote.backend === 'openvino') {
       const dev = (remote.device || 'CPU').toUpperCase();
       const state = dev === 'NPU' ? 'npu' : dev === 'GPU' ? 'gpu' : 'cpu';
-      const human = dev === 'NPU' ? 'Intel NPU'
-                  : dev === 'GPU' ? 'Intel GPU (iGPU)'
-                  : 'Intel CPU (OpenVINO)';
-      return { state, label: human, latencyMs: inferenceMs };
+      const baseName = dev === 'NPU' ? 'Intel NPU'
+                     : dev === 'GPU' ? 'Intel GPU (iGPU)'
+                     : 'Intel CPU (OpenVINO)';
+      const precision = remote.precision && remote.precision !== '?'
+        ? ` · ${remote.precision}`
+        : '';
+      return { state, label: `${baseName}${precision}`, latencyMs: inferenceMs };
     }
     if (remote.backend === 'opencv') {
       return { state: 'opencv', label: 'OpenCV (no AI accel)', latencyMs: inferenceMs };
@@ -1758,6 +1761,15 @@ if (backendToggleBtn) {
   setBackendButtonState();
   backendToggleBtn.addEventListener('click', async () => {
     const next = gazeBackend === 'mediapipe' ? 'openvino-bridge' : 'mediapipe';
+    // Health-check guard: don't let the user switch to a bridge that's
+    // demonstrably offline. The previous flow committed the toggle then
+    // discovered the bridge was unreachable during the slow boot path,
+    // by which time MediaPipe had already torn itself down. We block the
+    // switch with a targeted hint instead.
+    if (next === 'openvino-bridge' && !_bridgeAvailable) {
+      setBridgeHint('OpenVINO Bridge unreachable — start tools/openvino_bridge_server.py first, then click here to retry.');
+      return;
+    }
     gazeBackend = next;
     localStorage.setItem('senseease_gaze_backend', gazeBackend);
     setBackendButtonState();
@@ -1767,6 +1779,23 @@ if (backendToggleBtn) {
     gazeCalibrated = false;
     await enableWebcamMode();
   });
+}
+
+// On page load, sanity-check the persisted backend choice. If the user last
+// session selected the bridge but it's not currently running, silently
+// downgrade to mediapipe so they don't hit a stale-state error on first
+// Webcam Mode click. The probe runs ~3-9s after page load via probeBridge();
+// this guard runs synchronously to prevent the boot path from racing.
+if (gazeBackend === 'openvino-bridge') {
+  // Defer the actual decision until probe completes; mark provisional.
+  setTimeout(() => {
+    if (!_bridgeAvailable && gazeBackend === 'openvino-bridge') {
+      console.info('[Main] Persisted bridge unavailable, falling back to MediaPipe');
+      gazeBackend = 'mediapipe';
+      localStorage.setItem('senseease_gaze_backend', gazeBackend);
+      setBackendButtonState();
+    }
+  }, 11000); // after the 3-pass probe (max ~9.5s) has had a chance to resolve
 }
 
 // Auto-probe the OpenVINO bridge. Lightweight (one WS open + close, ~1.5s
@@ -1788,23 +1817,35 @@ function _formatBridgeHuman(hello) {
 async function probeBridge({ silent = false } = {}) {
   if (typeof OpenVinoBridgeTracker?.probe !== 'function') return;
   if (!silent) setBridgeHint('Probing OpenVINO bridge…');
-  try {
-    const hello = await OpenVinoBridgeTracker.probe('ws://127.0.0.1:8765', 1500);
-    _bridgeAvailable = true;
-    _bridgeHumanLabel = _formatBridgeHuman(hello);
-    if (gazeBackend === 'mediapipe') {
-      setBridgeHint(`✓ OpenVINO Bridge ready on ${_bridgeHumanLabel}. Click "Backend: OpenVINO Bridge" to switch.`);
-    } else {
-      setBridgeHint(`✓ OpenVINO Bridge live on ${_bridgeHumanLabel}.`);
-    }
-    console.info(`[Main] Bridge probe OK: backend=${hello.backend} device=${hello.device}`);
-  } catch (e) {
-    _bridgeAvailable = false;
-    _bridgeHumanLabel = null;
-    if (!silent) {
-      setBridgeHint('OpenVINO Bridge offline — using in-browser MediaPipe. Run tools/openvino_bridge_server.py for Intel NPU acceleration. (Click to retry)');
+  // Three-pass exponential probe (1.5s → 3s → 5s). The single 1.5s window
+  // routinely missed cold-boot servers where OpenVINO model compile takes
+  // 5-15s. Each pass is independent so a fast-start server still resolves
+  // immediately on attempt 1.
+  const timeouts = [1500, 3000, 5000];
+  let lastErr = null;
+  for (let i = 0; i < timeouts.length; i += 1) {
+    try {
+      if (!silent && i > 0) setBridgeHint(`Probing OpenVINO bridge… (retry ${i + 1}/3)`);
+      const hello = await OpenVinoBridgeTracker.probe('ws://127.0.0.1:8765', timeouts[i]);
+      _bridgeAvailable = true;
+      _bridgeHumanLabel = _formatBridgeHuman(hello);
+      if (gazeBackend === 'mediapipe') {
+        setBridgeHint(`✓ OpenVINO Bridge ready on ${_bridgeHumanLabel}. Click "Backend: OpenVINO Bridge" to switch.`);
+      } else {
+        setBridgeHint(`✓ OpenVINO Bridge live on ${_bridgeHumanLabel}.`);
+      }
+      console.info(`[Main] Bridge probe OK on attempt ${i + 1}: backend=${hello.backend} device=${hello.device}`);
+      return;
+    } catch (e) {
+      lastErr = e;
     }
   }
+  _bridgeAvailable = false;
+  _bridgeHumanLabel = null;
+  if (!silent) {
+    setBridgeHint('OpenVINO Bridge offline — using in-browser MediaPipe. Run tools/openvino_bridge_server.py for Intel NPU acceleration. (Click to retry)');
+  }
+  console.info('[Main] Bridge probe failed after 3 attempts:', lastErr?.message || lastErr);
 }
 
 // Initial probe on page load.
