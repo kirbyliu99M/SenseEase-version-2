@@ -24,24 +24,49 @@ export class GazeTracker {
     this._lastError = '';
     this._fallbackCenter = { x: 0, y: 0, ready: false };
     this._fallbackAmp = { x: 0.09, y: 0.07 };
+    this._activeDelegate = 'none';
+    this._inferenceMsEma = 0;
+    this._frameIntervalMs = 28; // ~35 Hz cap; loosened to ~22ms for GPU delegate
   }
 
   async _ensureMediaPipe() {
     if (this.faceLandmarker) return;
     this._loadState = 'loading';
     this._lastError = '';
+    this._activeDelegate = 'none';
+
+    const wasmFileset = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_BASE);
+    const buildOptions = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
+      outputFaceBlendshapes: true,
+      outputFacialTransformationMatrixes: false,
+      runningMode: 'VIDEO',
+      numFaces: 1,
+      // Lowered from 0.65 → 0.45 so faces are still detected under typical
+      // booth lighting (overhead glare, side lighting, glasses, off-axis
+      // angle). Higher numbers reject too aggressively and produced the
+      // 66-second stale window we saw in the field.
+      minFaceDetectionConfidence: 0.45,
+      minFacePresenceConfidence: 0.45,
+      minTrackingConfidence: 0.45,
+    });
+
+    // Try GPU delegate first — on machines with a working WebGL2 stack this
+    // cuts MediaPipe inference time roughly in half and frees the CPU for
+    // OFI/InferenceEngine work. CPU is the universal fallback.
     try {
-      const wasmFileset = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_BASE);
-      this.faceLandmarker = await FaceLandmarker.createFromOptions(wasmFileset, {
-        baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },
-        outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: false,
-        runningMode: 'VIDEO',
-        numFaces: 1,
-        minFaceDetectionConfidence: 0.65,
-        minFacePresenceConfidence: 0.65,
-        minTrackingConfidence: 0.65,
-      });
+      this.faceLandmarker = await FaceLandmarker.createFromOptions(wasmFileset, buildOptions('GPU'));
+      this._activeDelegate = 'GPU';
+      this._frameIntervalMs = 22; // GPU is ~2x faster — let it run closer to 45 Hz
+      this._loadState = 'ready';
+      return;
+    } catch (gpuErr) {
+      console.warn('[GazeTracker] GPU delegate unavailable, falling back to CPU:', gpuErr?.message || gpuErr);
+    }
+
+    try {
+      this.faceLandmarker = await FaceLandmarker.createFromOptions(wasmFileset, buildOptions('CPU'));
+      this._activeDelegate = 'CPU';
       this._loadState = 'ready';
     } catch (e) {
       this._loadState = 'error';
@@ -54,10 +79,20 @@ export class GazeTracker {
     if (!this.faceLandmarker || !video || video.videoWidth === 0) return null;
 
     const ts = performance.now();
-    if (ts - this._lastFrameMs < 28) return null;
+    // Adaptive frame skip: when inference is slow we widen the gap so the
+    // event loop has air to render the mask + run InferenceEngine. EMA-driven
+    // so it self-tunes per machine without a hard config.
+    const dynamicGapMs = Math.max(this._frameIntervalMs, this._inferenceMsEma * 1.4);
+    if (ts - this._lastFrameMs < dynamicGapMs) return null;
     this._lastFrameMs = ts;
 
+    const inferStart = performance.now();
     const result = this.faceLandmarker.detectForVideo(video, ts);
+    const inferMs = performance.now() - inferStart;
+    this._inferenceMsEma = this._inferenceMsEma === 0
+      ? inferMs
+      : this._inferenceMsEma * 0.85 + inferMs * 0.15;
+
     if (!result?.faceLandmarks?.[0]) return null;
 
     if (result.faceBlendshapes?.[0]) {
@@ -81,7 +116,15 @@ export class GazeTracker {
 
       const blink = Math.max(getScore('eyeBlinkLeft'), getScore('eyeBlinkRight'));
       const lookMagnitude = Math.hypot(gazeX, gazeY);
-      const quality = _clamp((1 - blink * 0.9) + Math.min(0.16, lookMagnitude * 0.35), 0.08, 1.0);
+      // Detection quality (eyelid openness) and gaze magnitude are different
+      // signals — the old formula conflated them, letting wide off-axis gaze
+      // inflate quality even on partially-occluded faces. Keep them separate
+      // and only let magnitude break ties when detection is already solid.
+      const detectionQuality = _clamp(1 - blink * 0.95, 0.0, 1.0);
+      const magnitudeBoost = detectionQuality > 0.6
+        ? Math.min(0.12, lookMagnitude * 0.28)
+        : 0;
+      const quality = _clamp(detectionQuality + magnitudeBoost, 0.08, 1.0);
 
       return { x: gazeX, y: gazeY, quality };
     }
@@ -153,7 +196,7 @@ export class GazeTracker {
     profile = 'quick',          // quick | full
     dwellMs = 700,
     sampleCount = 10,
-    preCenterMs = 2200,
+    preCenterMs = 2800,
   } = {}) {
     if (!this._isReady) await this.start();
     this._calibrating = true;
@@ -240,9 +283,27 @@ export class GazeTracker {
     return true;
   }
 
+  // 800ms drift fix without rebuilding the quadratic mapping. Used when the
+  // existing calibration is fundamentally good but fovea drift has crept in
+  // (different seating posture, head pose). Cheap to invoke from a button.
+  async microRecalibrate({ windowMs = 800 } = {}) {
+    if (!this._isReady) return false;
+    this._calibrating = true;
+    this._showCalibrationOverlay();
+    const baseline = await this._collectCenterBaseline(windowMs);
+    this._dismissCalibrationOverlay();
+    this._calibrating = false;
+    if (!baseline) return false;
+    this._fallbackCenter = { x: baseline.cx, y: baseline.cy, ready: true };
+    return true;
+  }
+
   getDiagnostics() {
     return {
       backend: 'mediapipe',
+      delegate: this._activeDelegate,
+      inferenceMs: this._inferenceMsEma,
+      frameIntervalMs: this._frameIntervalMs,
       calibration: this._lastCalibration,
       loadState: this._loadState,
       lastError: this._lastError,
@@ -353,28 +414,54 @@ export class GazeTracker {
     const windowMs = Math.max(1800, preCenterMs | 0);
     const sampleStep = 26;
     const samples = [];
+    let lowQualityFrames = 0;
+    let noFaceFrames = 0;
     const t0 = performance.now();
 
+    // Best-effort early-exit: once we have ≥12 usable samples after 1.5s,
+    // we already have enough for a quick baseline. Keeps total calibration
+    // brisk on machines with healthy MediaPipe FPS.
+    const earlyExitMs = 1500;
+    const earlyExitMin = 12;
+
     while (performance.now() - t0 < windowMs) {
-      const remain = Math.max(0, windowMs - (performance.now() - t0));
-      this._moveCalibrationDot(sx, sy, `Center lock ${Math.ceil(remain / 1000)}s`);
+      const elapsed = performance.now() - t0;
+      const remain = Math.max(0, windowMs - elapsed);
       const s = this._sampleIris(this.webcam.videoElement);
-      if (s && s.quality >= 0.14) samples.push(s);
+      if (s && s.quality >= 0.2) {
+        samples.push(s);
+      } else if (s) {
+        lowQualityFrames += 1;
+      } else {
+        noFaceFrames += 1;
+      }
+
+      // Progressive status — tells user *why* if we're not collecting samples
+      // instead of failing silently and throwing a generic message at the end.
+      let statusHint = `Center lock ${Math.ceil(remain / 1000)}s`;
+      if (elapsed > 700 && samples.length < 4) {
+        if (noFaceFrames > samples.length * 2) {
+          statusHint = 'Face not detected — center your face ~50cm from camera';
+        } else if (lowQualityFrames > samples.length * 2) {
+          statusHint = 'Light too low — please brighten the room';
+        }
+      }
+      this._moveCalibrationDot(sx, sy, statusHint);
+
+      if (elapsed >= earlyExitMs && samples.length >= earlyExitMin) break;
       await _sleep(sampleStep);
     }
 
-    if (samples.length < Math.max(18, Math.floor(windowMs / 200))) return null;
-
-    const cx = samples.reduce((acc, v) => acc + v.x, 0) / samples.length;
-    const cy = samples.reduce((acc, v) => acc + v.y, 0) / samples.length;
-    const ax = samples.reduce((acc, v) => acc + Math.abs(v.x - cx), 0) / samples.length;
-    const ay = samples.reduce((acc, v) => acc + Math.abs(v.y - cy), 0) / samples.length;
+    if (samples.length < Math.max(8, earlyExitMin)) return null;
+    const robust = _robustCenter(samples);
+    if (!robust) return null;
+    const { cx, cy, ax, ay } = robust;
 
     // Establish a stable fallback anchor before multi-point solve.
     this._fallbackCenter = { x: cx, y: cy, ready: true };
     this._fallbackAmp = {
-      x: _clamp(Math.max(0.06, ax * 2.4), 0.05, 0.28),
-      y: _clamp(Math.max(0.05, ay * 2.4), 0.045, 0.24),
+      x: _clamp(Math.max(0.055, ax * 2.0), 0.05, 0.24),
+      y: _clamp(Math.max(0.048, ay * 2.0), 0.045, 0.21),
     };
     return { cx, cy, ax, ay, samples: samples.length };
   }
@@ -445,13 +532,13 @@ function _buildQuickMappingFromBaseline(baseline, width, height) {
   if (!baseline) return null;
   const cx = baseline.cx;
   const cy = baseline.cy;
-  const ax = Math.max(0.025, baseline.ax || 0.05);
-  const ay = Math.max(0.02, baseline.ay || 0.045);
+  const ax = Math.max(0.022, baseline.ax || 0.05);
+  const ay = Math.max(0.018, baseline.ay || 0.045);
 
-  const ux = _clamp(ax * 4.2, 0.05, 0.24);
-  const uy = _clamp(ay * 4.2, 0.045, 0.21);
-  const rx = width * 0.4;   // target ~80% span (10%..90%)
-  const ry = height * 0.4;
+  const ux = _clamp(ax * 3.55, 0.045, 0.2);
+  const uy = _clamp(ay * 3.55, 0.04, 0.18);
+  const rx = width * 0.34;
+  const ry = height * 0.34;
 
   const points = [
     { x: cx, y: cy, sx: width * 0.5, sy: height * 0.5 },
@@ -465,7 +552,23 @@ function _buildQuickMappingFromBaseline(baseline, width, height) {
     { x: cx - ux * 0.75, y: cy - uy * 0.75, sx: width * 0.5 - rx * 0.8, sy: height * 0.5 - ry * 0.8 },
   ];
 
-  return _fitQuadraticMapping(points, 0.0032);
+  return _fitQuadraticMapping(points, 0.0042);
+}
+
+function _robustCenter(samples) {
+  if (!Array.isArray(samples) || samples.length < 8) return null;
+  const sortedX = samples.map((s) => s.x).sort((a, b) => a - b);
+  const sortedY = samples.map((s) => s.y).sort((a, b) => a - b);
+  const trim = Math.floor(samples.length * 0.15);
+  const sliceX = sortedX.slice(trim, sortedX.length - trim);
+  const sliceY = sortedY.slice(trim, sortedY.length - trim);
+  if (sliceX.length < 6 || sliceY.length < 6) return null;
+
+  const cx = sliceX.reduce((acc, v) => acc + v, 0) / sliceX.length;
+  const cy = sliceY.reduce((acc, v) => acc + v, 0) / sliceY.length;
+  const ax = sliceX.reduce((acc, v) => acc + Math.abs(v - cx), 0) / sliceX.length;
+  const ay = sliceY.reduce((acc, v) => acc + Math.abs(v - cy), 0) / sliceY.length;
+  return { cx, cy, ax, ay };
 }
 
 function _basis(x, y) {

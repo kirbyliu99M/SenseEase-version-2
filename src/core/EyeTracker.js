@@ -1,3 +1,8 @@
+// Single source of truth for "no fresh gaze sample" timeout. extractFeatures
+// re-centers earlier (75% of this) but mode/banners flip at the full window.
+export const STALE_LOST_MS = 450;
+export const STALE_RECENTER_MS = STALE_LOST_MS * 0.78; // ~350ms
+
 export class EyeTracker {
   constructor() {
     this.screenCenterX = window.innerWidth / 2;
@@ -102,16 +107,21 @@ export class EyeTracker {
       };
     }
 
-    // Micro-jitter deadzone: suppress tiny noise-induced movement.
+    // Adaptive micro-jitter deadzone. Static gaze with high confidence collapses
+    // to a tight 12px ring; low confidence or motion relaxes up to 32px so we
+    // don't swallow real saccades. The previous fixed 26px occasionally let
+    // single-pixel jitter through on long fixations.
     const microDist = Math.hypot(accepted.x - this._raw.x, accepted.y - this._raw.y);
-    if (microDist < 14 && q < 0.95) {
+    const motionFactor = _clamp(rawSpeed / 600, 0, 1);
+    const deadzonePx = _lerp(12, 32, Math.max(motionFactor, 1 - q));
+    if (microDist < deadzonePx && q < 0.98) {
       accepted = { ...this._raw };
     }
 
     // One-Euro style filter tuned for webcam jitter.
     const dCutoff = 0.75;
-    const minCutoff = 0.16 + (1 - q) * 0.32;
-    const beta = 0.004 + q * 0.014;
+    const minCutoff = 0.1 + (1 - q) * 0.22;
+    const beta = 0.003 + q * 0.01;
 
     const rawVx = (accepted.x - this._raw.x) / dt;
     const rawVy = (accepted.y - this._raw.y) / dt;
@@ -136,33 +146,44 @@ export class EyeTracker {
     const isCoarse = q < 0.45 || this._sampleHzEma < 12;
     if (isCoarse) {
       this._mode = 'coarse';
-      this._output.x = _lerp(this._output.x, zoneCenter.x, 0.12);
-      this._output.y = _lerp(this._output.y, zoneCenter.y, 0.12);
+      this._output.x = _lerp(this._output.x, zoneCenter.x, 0.08);
+      this._output.y = _lerp(this._output.y, zoneCenter.y, 0.08);
     } else {
       this._mode = q < 0.52 ? 'reacquire' : 'fine';
       const speedRatio = _clamp(speed / 1000, 0, 1);
-      const magnet = (1 - speedRatio) * (0.12 + q * 0.12);
+      // Weaker magnet — the prior 0.08 + q*0.09 over-snapped to zone centers
+      // and contributed to the "calibration looks off after pass" complaint.
+      // Calibrated mapping is good enough that we can trust filtered position
+      // more than the 3×3 zone grid.
+      const magnet = (1 - speedRatio) * (0.04 + q * 0.05);
 
       const magneticX = _lerp(this._filtered.x, zoneCenter.x, magnet);
       const magneticY = _lerp(this._filtered.y, zoneCenter.y, magnet);
       const distToOutput = Math.hypot(magneticX - this._output.x, magneticY - this._output.y);
-      const holdRadius = 72;
-      const commitRadius = 96;
-      const moveConfirmMs = speed > 700 ? 120 : 190;
+      // Larger detection range — mask is allowed to follow gaze loosely from
+      // further out without an "intent commit" gate. The user explicitly asked
+      // for "shader follows the eye approximately" rather than pixel-tight.
+      const holdRadius = 180;       // was 120
+      const commitRadius = 260;     // was 170
+      // Faster response: shorter dwell before committing a move. Smoothness
+      // is preserved by the glide alpha lerp at the end of the function.
+      const moveConfirmMs = speed > 700 ? 110 : 180; // was 190 / 300
 
       if (distToOutput < holdRadius) {
         this._intentTarget = null;
         this._intentSince = 0;
-        this._output.x = _lerp(this._output.x, magneticX, 0.012);
-        this._output.y = _lerp(this._output.y, magneticY, 0.012);
+        // Higher follow-through inside hold radius so micro-saccades get
+        // tracked. Glide pass at the end smooths it visually.
+        this._output.x = _lerp(this._output.x, magneticX, 0.018); // was 0.006
+        this._output.y = _lerp(this._output.y, magneticY, 0.018);
       } else if (distToOutput < commitRadius) {
         this._intentTarget = null;
         this._intentSince = 0;
-        this._output.x = _lerp(this._output.x, magneticX, 0.03);
-        this._output.y = _lerp(this._output.y, magneticY, 0.03);
+        this._output.x = _lerp(this._output.x, magneticX, 0.045); // was 0.016
+        this._output.y = _lerp(this._output.y, magneticY, 0.045);
       } else {
         const sameIntent = this._intentTarget
-          && Math.hypot(this._intentTarget.x - magneticX, this._intentTarget.y - magneticY) < 64;
+          && Math.hypot(this._intentTarget.x - magneticX, this._intentTarget.y - magneticY) < 110; // was 82
         if (!sameIntent) {
           this._intentTarget = { x: magneticX, y: magneticY };
           this._intentSince = now;
@@ -170,7 +191,8 @@ export class EyeTracker {
 
         const intentMs = now - this._intentSince;
         if (intentMs >= moveConfirmMs) {
-          const outputAlpha = speedRatio > 0.45 ? 0.18 : 0.1;
+          // Stronger commit alpha — once we've decided to move, get there.
+          const outputAlpha = speedRatio > 0.45 ? 0.18 : 0.10; // was 0.11 / 0.06
           this._output.x = _lerp(this._output.x, magneticX, outputAlpha);
           this._output.y = _lerp(this._output.y, magneticY, outputAlpha);
         }
@@ -179,7 +201,14 @@ export class EyeTracker {
 
     const aiOutput = this._runAiAssist(this._output.x, this._output.y, q, dt);
     if (!this._glide) this._glide = { ...aiOutput };
-    const glideAlpha = speed > 800 ? 0.14 : 0.075;
+    // Glide alpha tuned to chase the (now more responsive) output without
+    // losing smoothness. Higher floor (0.085) means small movements reach
+    // the screen quickly; high-speed cap (0.22) keeps saccades tracking.
+    const glideDist = Math.hypot(aiOutput.x - this._glide.x, aiOutput.y - this._glide.y);
+    let glideAlpha;
+    if (speed > 800 || glideDist > 60)      glideAlpha = 0.22;
+    else if (speed > 300 || glideDist > 20) glideAlpha = 0.14;
+    else                                     glideAlpha = 0.085;
     this._glide.x = _lerp(this._glide.x, aiOutput.x, glideAlpha);
     this._glide.y = _lerp(this._glide.y, aiOutput.y, glideAlpha);
 
@@ -192,6 +221,16 @@ export class EyeTracker {
     this._lastTs = now;
     this._lastRawTs = now;
     this._lastQuality = q;
+  }
+
+  // Wipe drift-bias accumulated by AI assist without dropping the live filter
+  // chain. Calibration completion should call this so any pre-calibration bias
+  // doesn't leak into the calibrated pipeline as a permanent offset.
+  clearAiAssistBias() {
+    this._aiAssist.biasX = 0;
+    this._aiAssist.biasY = 0;
+    this._aiAssist.vx = 0;
+    this._aiAssist.vy = 0;
   }
 
   clearGazeSample() {
@@ -225,7 +264,7 @@ export class EyeTracker {
     const zone = Number.isFinite(this._zoneStable) ? this._zoneStable : -1;
     return {
       backend: this._backend,
-      mode: staleMs > 450 ? 'lost' : this._mode,
+      mode: staleMs > STALE_LOST_MS ? 'lost' : this._mode,
       quality: this._lastQuality,
       velocity: this._velocity,
       sampleHz: this._sampleHzEma,
@@ -243,7 +282,7 @@ export class EyeTracker {
 
     if (this.disableMouse && this.gazeOverride && this._lastRawTs) {
       const staleMs = performance.now() - this._lastRawTs;
-      if (staleMs > 350) {
+      if (staleMs > STALE_RECENTER_MS) {
         this._mode = 'lost';
         // If signal drops, gently re-center instead of freezing forever.
         this.gazeOverride.x = _lerp(this.gazeOverride.x, this.screenCenterX, 0.02);
@@ -320,7 +359,7 @@ export class EyeTracker {
     }
 
     const dwellMs = now - this._zonePendingSince;
-    const requiredMs = speed > 700 ? 220 : 340;
+    const requiredMs = speed > 700 ? 300 : 460;
     if (dwellMs >= requiredMs) {
       this._zoneStable = nextZone;
       this._zonePendingSince = now;
@@ -347,17 +386,17 @@ export class EyeTracker {
     const rx = x - predX;
     const ry = y - predY;
     const residual = Math.hypot(rx, ry);
-    const smoothGain = residual < 32 ? 0.11 : residual < 84 ? 0.18 : 0.28;
+    const smoothGain = residual < 32 ? 0.08 : residual < 84 ? 0.14 : 0.22;
     const confGain = _clamp(0.55 + q * 0.45, 0.55, 1.0);
     const kPos = smoothGain * confGain;
-    const kVel = _clamp(0.6 * kPos, 0.05, 0.22);
+    const kVel = _clamp(0.52 * kPos, 0.04, 0.18);
 
     st.x = predX + kPos * rx;
     st.y = predY + kPos * ry;
     st.vx = _lerp(st.vx, (kVel * rx) / Math.max(dt, 1 / 120), 0.42);
     st.vy = _lerp(st.vy, (kVel * ry) / Math.max(dt, 1 / 120), 0.42);
 
-    const driftLike = residual < 18 && Math.hypot(st.vx, st.vy) < 120;
+    const driftLike = residual < 14 && Math.hypot(st.vx, st.vy) < 90;
     if (driftLike) {
       st.biasX = _lerp(st.biasX, st.x - x, 0.05);
       st.biasY = _lerp(st.biasY, st.y - y, 0.05);

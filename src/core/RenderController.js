@@ -20,8 +20,23 @@ export class RenderController {
     this.userRadiusOffset = 0;
     this.radiusOverride = null;
 
+    this._cachedRect = null;
+    this._rectStaleAt = 0;
+
     this.initMouseTracking();
     this.createFallbackOverlay();
+  }
+
+  // Layout-thrashing avoidance: getBoundingClientRect forces a sync layout.
+  // The video frame is 30 fps so refreshing the cache every 33ms is plenty;
+  // pin re-reads to scroll/resize for correctness on flow changes.
+  _readRect() {
+    if (!this.targetElement) return null;
+    const now = performance.now();
+    if (this._cachedRect && now < this._rectStaleAt) return this._cachedRect;
+    this._cachedRect = this.targetElement.getBoundingClientRect();
+    this._rectStaleAt = now + 33;
+    return this._cachedRect;
   }
 
   forceHideMaskLayers() {
@@ -95,7 +110,11 @@ export class RenderController {
         return;
       }
 
-      const rect = this.targetElement.getBoundingClientRect();
+      const rect = this._readRect();
+      if (!rect) {
+        requestAnimationFrame(renderLoop);
+        return;
+      }
 
       const currentFlow = this.observer ? this.observer.opticalFlow : 0;
       const currentPressure = this.inferenceEngine ? this.inferenceEngine.getPressure() : 0;
@@ -135,6 +154,33 @@ export class RenderController {
           const features = this.eyeTracker.extractFeatures(this.mouseX, this.mouseY);
           gazeX = features.gazeOriginX - rect.left;
           gazeY = features.gazeOriginY - rect.top;
+        }
+
+        // Confine gaze to the demo target (Main Scenario video) bounds.
+        // - Inside rect: pass through unchanged.
+        // - Slightly outside (within tolerance): clamp to nearest edge so the
+        //   mask sticks to the video boundary instead of drifting onto chrome.
+        // - Far outside: fade the mask out entirely so it stops following an
+        //   off-screen gaze (the user is no longer looking at the video).
+        const overshootX = gazeX < 0 ? -gazeX : gazeX > rect.width ? gazeX - rect.width : 0;
+        const overshootY = gazeY < 0 ? -gazeY : gazeY > rect.height ? gazeY - rect.height : 0;
+        const overshoot = Math.max(overshootX, overshootY);
+        const tolerancePx = Math.max(40, Math.min(rect.width, rect.height) * 0.18);
+        if (overshoot > 0) {
+          gazeX = Math.max(0, Math.min(rect.width, gazeX));
+          gazeY = Math.max(0, Math.min(rect.height, gazeY));
+        }
+        if (overshoot > tolerancePx) {
+          // Far overshoot — collapse intensity and skip this frame's draw.
+          const fade = Math.max(0, 1 - (overshoot - tolerancePx) / tolerancePx);
+          this.currentIntensity *= fade;
+          if (this.currentIntensity <= HIDE_THRESHOLD) {
+            this.maskVisible = false;
+            if (this.shader && this.shader.isValid) this.shader.render(0, 0, 100, 100, 0);
+            this.forceHideMaskLayers();
+            requestAnimationFrame(renderLoop);
+            return;
+          }
         }
 
         let targetRadiusInner = 130 - (currentFlow / 150) * 105;

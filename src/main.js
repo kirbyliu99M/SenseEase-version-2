@@ -10,6 +10,7 @@ import { DitheringShader }  from './core/DitheringShader.js'
 import { WebcamSource }     from './core/WebcamSource.js'
 import { LuxSensor }        from './core/LuxSensor.js'
 import { GazeTracker }      from './core/GazeTracker.js'
+import { OpenVinoBridgeTracker } from './core/OpenVinoBridgeTracker.js'
 
 // ?? V4 Four-Layer Architecture ??????????????????????????
 const eyeTracker     = new EyeTracker();
@@ -45,6 +46,23 @@ if (!elDashPressure) console.error('[MainLoop] #dash-pressure not found; VIMS UI
 console.assert(!!elDashPressure || !!elVimsPressureValue, '[MainLoop] No pressure DOM target found.');
 
 const gazeIndicator = document.getElementById('gaze-indicator');
+const markerToggleBtn = document.getElementById('main-marker-toggle');
+// Persisted across reloads — booth presenters tend to keep one preference.
+let gazeMarkerVisible = (() => {
+  try { return localStorage.getItem('senseease.gazeMarker') !== '0'; } catch { return true; }
+})();
+function setGazeMarkerVisible(v) {
+  gazeMarkerVisible = !!v;
+  try { localStorage.setItem('senseease.gazeMarker', v ? '1' : '0'); } catch {}
+  if (markerToggleBtn) {
+    markerToggleBtn.innerText = gazeMarkerVisible ? 'Hide Gaze Marker' : 'Show Gaze Marker';
+    markerToggleBtn.classList.toggle('active', !gazeMarkerVisible);
+  }
+}
+if (markerToggleBtn) {
+  markerToggleBtn.addEventListener('click', () => setGazeMarkerVisible(!gazeMarkerVisible));
+  setGazeMarkerVisible(gazeMarkerVisible);
+}
 
 function runGlobalMainLoop() {
   const pressure = inferenceEngine.getPressure();
@@ -65,7 +83,10 @@ function runGlobalMainLoop() {
 
   // Gaze Indicator sync
   if (gazeIndicator) {
-    if (eyeTracker.gazeOverride && document.getElementById('demo-main')?.classList.contains('active')) {
+    const showMarker = gazeMarkerVisible
+      && eyeTracker.gazeOverride
+      && document.getElementById('demo-main')?.classList.contains('active');
+    if (showMarker) {
       gazeIndicator.style.display = 'block';
       gazeIndicator.style.left = `${eyeTracker.gazeOverride.x}px`;
       gazeIndicator.style.top = `${eyeTracker.gazeOverride.y}px`;
@@ -271,7 +292,8 @@ function refreshTheaterGazeBinding() {
   if (webcamMode && gazeTracker) {
     setTimeout(async () => {
       try {
-        await gazeTracker.calibrate({ profile: 'quick', preCenterMs: 1000 });
+        await gazeTracker.calibrate({ profile: 'quick', preCenterMs: 2200 });
+        eyeTracker.clearAiAssistBias();
         gazeLastError = '';
       } catch (e) {
         gazeLastError = formatBootError(e);
@@ -841,6 +863,12 @@ function setCircadianWarmth(warmth01) {
   else if (warmth01 < 0.75) label = '?? Evening';
   else                      label = '?? Night';
 
+  // Color-temperature hint. warmth=0 (cool daylight) ≈ 6500K,
+  // warmth=1 (warm tungsten) ≈ 3000K. Linear K interpolation is rough but
+  // matches what monitor blue-light-reduction settings typically expose.
+  const kelvin = Math.round(6500 - warmth01 * 3500);
+  const tempLabel = `≈ ${kelvin}K`;
+
   // Overlay: transparent morning ??warm amber-red night
   const r = 255;
   const g = Math.round(220 - warmth01 * 130);  // 220 ??90
@@ -855,6 +883,19 @@ function setCircadianWarmth(warmth01) {
   const brightness = (1 - warmth01 * 0.1).toFixed(3);
   const contrast = (1 - warmth01 * 0.05).toFixed(3);
   const filter = `sepia(${sepia}) hue-rotate(${hueRot}deg) brightness(${brightness}) contrast(${contrast})`;
+
+  // Main Scenario carries a stronger adaptive-visuals layer (v1 "BenQ
+  // ScreenBar analog" port + Samsung outdoor-visibility cue):
+  //   - dim room  → push brightness up to 1.20, contrast up to 1.18,
+  //                 saturate up to 1.10, plus night-sharp text-shadow
+  //   - bright room → drop brightness to 0.85 to fight glare, ease contrast
+  // The mid-band stays neutral so normal indoor lighting is unchanged.
+  const mainBrightness = (0.85 + (1 - warmth01) * 0.0 + warmth01 * 0.35).toFixed(3); // 0.85 → 1.20
+  const mainContrast   = (1.00 + warmth01 * 0.18).toFixed(3);
+  const mainSaturate   = (1.00 + warmth01 * 0.10).toFixed(3);
+  const mainSepia      = (warmth01 * 0.18).toFixed(3);
+  const mainHueRot     = Math.round(warmth01 * -8);
+  const mainFilter = `sepia(${mainSepia}) hue-rotate(${mainHueRot}deg) brightness(${mainBrightness}) contrast(${mainContrast}) saturate(${mainSaturate})`;
 
   function _apply(overlayId, badgeId, progressId, videoId) {
     const overlay = document.getElementById(overlayId);
@@ -872,7 +913,29 @@ function setCircadianWarmth(warmth01) {
 
   // Legacy S4 binding
   _apply('circadian-overlay', 'circadian-badge', 'circadian-progress', 'office-video');
-  // Main Scenario binding removed per user request
+
+  // Main Scenario adaptive visuals — apply the stronger v1-derived filter
+  // to #main-video and (when present) the Main Scenario container so
+  // brightness/contrast/sharpness actually respond to ambient light.
+  const mainOverlay = document.getElementById('main-circadian-overlay');
+  const mainBadge   = document.getElementById('main-circadian-badge');
+  const mainProg    = document.getElementById('main-circadian-progress');
+  const mainVid     = document.getElementById('main-video');
+  if (mainOverlay) { mainOverlay.style.background = bg; mainOverlay.style.opacity = opacity; }
+  if (mainBadge)  mainBadge.textContent = label;
+  if (mainProg)   mainProg.style.width = widthStr;
+  if (mainVid)    mainVid.style.filter = mainFilter;
+
+  const colorTempEl = document.getElementById('main-color-temp');
+  if (colorTempEl) {
+    colorTempEl.textContent = tempLabel;
+    // Pill border tint shifts with temperature so the cue is visible at a
+    // glance: cool blue → warm amber. Amber chosen to match the night-sharp
+    // mode chrome the user already sees.
+    const borderHue = Math.round(210 - warmth01 * 180); // 210 (blue) → 30 (amber)
+    colorTempEl.style.borderColor = `hsl(${borderHue}, 80%, 50%)`;
+    colorTempEl.style.color = `hsl(${borderHue}, 70%, 30%)`;
+  }
 
   // Night-sharpness text enhancement when sufficiently dark
   const scen4Panel = document.getElementById('demo-scen4');
@@ -1312,10 +1375,12 @@ let gazeLastError = '';
 let gazeCalibrated = false;
 const luxChip = document.getElementById('main-lux-chip');
 const webcamToggleBtn = document.getElementById('main-webcam-toggle');
+const backendToggleBtn = document.getElementById('main-backend-toggle');
 const recalibrateBtn = document.getElementById('main-recalibrate-btn');
 const debugToggleBtn = document.getElementById('main-debug-toggle');
 let gazeDebugPanel = null;
 let gazeDebugVisible = false;
+let gazeBackend = localStorage.getItem('senseease_gaze_backend') || 'mediapipe';
 
 function setLuxChip(text) { if (luxChip) luxChip.innerText = text; }
 
@@ -1341,6 +1406,141 @@ function setRecalibrateButtonState({ enabled = true, busy = false } = {}) {
   recalibrateBtn.innerText = busy ? 'Quick center lock + calibrating...' : 'Recalibrate (Quick center)';
 }
 
+function setBackendButtonState() {
+  if (!backendToggleBtn) return;
+  const label = gazeBackend === 'openvino-bridge' ? 'OpenVINO Bridge' : 'MediaPipe';
+  backendToggleBtn.innerText = `Backend: ${label}`;
+  backendToggleBtn.classList.toggle('active', gazeBackend === 'openvino-bridge');
+}
+
+// ---------------------------------------------------------------------------
+// Backend status pill — visible-to-audience indicator of which inference
+// path is actually returning gaze samples. Colour-coded by device:
+//   green=NPU, cyan=GPU, amber=CPU(OpenVINO), orange=OpenCV, blue=MediaPipe,
+//   red=fallback (bridge requested but unreachable).
+// ---------------------------------------------------------------------------
+const backendPill = document.getElementById('main-backend-pill');
+const backendPillLabel = document.getElementById('main-backend-pill-label');
+const backendPillLatency = document.getElementById('main-backend-pill-latency');
+const bridgeHintEl = document.getElementById('main-bridge-hint');
+const gazeHintEl = document.getElementById('main-gaze-hint');
+
+function setBackendPill({ state, label, latencyMs, visible = true }) {
+  if (!backendPill) return;
+  backendPill.style.display = visible ? '' : 'none';
+  if (visible && state) backendPill.setAttribute('data-state', state);
+  if (backendPillLabel && label) backendPillLabel.textContent = label;
+  if (backendPillLatency) {
+    if (Number.isFinite(latencyMs) && latencyMs > 0) {
+      backendPillLatency.textContent = `· ${latencyMs.toFixed(1)} ms`;
+    } else {
+      backendPillLatency.textContent = '';
+    }
+  }
+}
+
+function setBridgeHint(text) {
+  if (bridgeHintEl) bridgeHintEl.textContent = text || '';
+}
+
+function showGazeHint(on) {
+  if (gazeHintEl) gazeHintEl.style.display = on ? '' : 'none';
+}
+
+// Resolve a (state, label) tuple from the live tracker diagnostics.
+function _pillStateFromTracker() {
+  if (!gazeTracker) return { state: 'idle', label: 'Backend: idle' };
+  const diag = gazeTracker.getDiagnostics ? gazeTracker.getDiagnostics() : null;
+  if (gazeBackend === 'openvino-bridge') {
+    const remote = diag?.remote || {};
+    const inferenceMs = diag?.inferenceMs;
+    if (remote.backend === 'openvino') {
+      const dev = (remote.device || 'CPU').toUpperCase();
+      const state = dev === 'NPU' ? 'npu' : dev === 'GPU' ? 'gpu' : 'cpu';
+      const human = dev === 'NPU' ? 'Intel NPU'
+                  : dev === 'GPU' ? 'Intel GPU (iGPU)'
+                  : 'Intel CPU (OpenVINO)';
+      return { state, label: human, latencyMs: inferenceMs };
+    }
+    if (remote.backend === 'opencv') {
+      return { state: 'opencv', label: 'OpenCV (no AI accel)', latencyMs: inferenceMs };
+    }
+    return { state: 'mediapipe', label: 'Bridge connecting...' };
+  }
+  // MediaPipe (in-browser) — surface which delegate the runtime accepted so
+  // booth visitors can see when the GPU path is active vs the CPU fallback.
+  const delegate = (diag?.delegate || '').toUpperCase();
+  const latencyMs = diag?.inferenceMs;
+  if (delegate === 'GPU') {
+    return { state: 'gpu', label: 'MediaPipe · GPU (WebGL)', latencyMs };
+  }
+  if (delegate === 'CPU') {
+    return { state: 'mediapipe', label: 'MediaPipe · CPU (in-browser)', latencyMs };
+  }
+  return { state: 'mediapipe', label: 'MediaPipe (in-browser)' };
+}
+
+function refreshBackendPill() {
+  if (!webcamMode) {
+    setBackendPill({ visible: false });
+    return;
+  }
+  const s = _pillStateFromTracker();
+  setBackendPill({ ...s, visible: true });
+}
+
+// Live "gaze lost" watcher. EyeTracker.getDiagnostics().mode flips to 'lost'
+// when no fresh gaze sample has arrived for >450ms. We surface that to the
+// user with a red hint + auto-restore when samples resume — by far the
+// commonest field issue (face out of frame, glare, looking away).
+const gazeLostEl = document.getElementById('main-gaze-lost');
+function refreshGazeLostState() {
+  if (!webcamMode || !gazeTracker || !eyeTracker?.getDiagnostics) {
+    if (gazeLostEl) gazeLostEl.style.display = 'none';
+    return;
+  }
+  const d = eyeTracker.getDiagnostics();
+  // Show "lost" if EyeTracker hasn't seen a sample in >1s. The 450ms internal
+  // 'lost' threshold can flicker with brief blinks, so we use a more forgiving
+  // 1s window for the user-visible warning.
+  const isLost = Number.isFinite(d.staleMs) ? d.staleMs > 1000 : true;
+  if (gazeLostEl) {
+    gazeLostEl.style.display = isLost ? '' : 'none';
+    if (isLost) {
+      // Classify *why* gaze is lost so the CTA matches the actual problem.
+      // - sampleHz still high but stale → MediaPipe is running, face left frame
+      // - quality persistently low → lighting / face occlusion
+      // - delegate=='none' → tracker never finished loading
+      const tDiag = gazeTracker.getDiagnostics ? gazeTracker.getDiagnostics() : {};
+      const delegate = (tDiag.delegate || '').toLowerCase();
+      let cta = 'Gaze tracking lost — recalibrate';
+      if (delegate === 'none' || tDiag.loadState === 'error') {
+        cta = 'Tracker not ready — toggle Webcam Mode off and on';
+      } else if (Number.isFinite(d.quality) && d.quality < 0.25) {
+        cta = 'Light too low or face occluded — brighten room, remove glasses if dark';
+      } else if (Number.isFinite(d.sampleHz) && d.sampleHz > 20) {
+        cta = 'Face out of frame — center yourself ~50cm from camera';
+      } else {
+        cta = 'No gaze samples — click Recalibrate (Shift+Click for full)';
+      }
+      gazeLostEl.dataset.reason = cta;
+      // The element's text content drives the visible message; safe to set
+      // unconditionally since we only run this when isLost.
+      const msgEl = gazeLostEl.querySelector('[data-role="msg"]') || gazeLostEl;
+      msgEl.textContent = cta;
+    }
+  }
+  if (gazeHintEl) gazeHintEl.style.display = isLost ? 'none' : '';
+}
+
+// Refresh the pill + gaze-lost state at 4 Hz — fast enough for the lost
+// warning to feel responsive without thrashing the DOM. Animation/colours
+// are CSS-driven.
+setInterval(() => {
+  refreshBackendPill();
+  refreshGazeLostState();
+}, 250);
+
 function setDebugButtonState({ enabled = false } = {}) {
   if (!debugToggleBtn) return;
   debugToggleBtn.style.display = enabled ? '' : 'none';
@@ -1353,21 +1553,32 @@ function createGazeTracker() {
     eyeTracker.setGazeSample(gx, gy, {
       quality: meta.quality,
       ts: meta.ts,
-      source: meta.source || 'mediapipe',
+      source: meta.source || gazeBackend,
     });
   };
+  if (gazeBackend === 'openvino-bridge') {
+    return new OpenVinoBridgeTracker(webcamSource, onGaze, {
+      wsUrl: 'ws://127.0.0.1:8765',
+      sendHz: 12,
+    });
+  }
   return new GazeTracker(webcamSource, onGaze);
 }
 
 async function startMediaPipeGaze() {
-  eyeTracker.setActiveBackend('mediapipe');
+  eyeTracker.setActiveBackend(gazeBackend);
   const tracker = createGazeTracker();
   await tracker.start();
 
   let calibrationError = '';
   if (!gazeCalibrated) {
     try {
-      await tracker.calibrate({ profile: 'quick', preCenterMs: 1600 });
+      if (gazeBackend === 'openvino-bridge') {
+        await tracker.calibrate({ preCenterMs: 1600 });
+      } else {
+        await tracker.calibrate({ profile: 'quick', preCenterMs: 2600 });
+      }
+      eyeTracker.clearAiAssistBias();
       gazeCalibrated = true;
     } catch (e) {
       calibrationError = formatBootError(e);
@@ -1387,31 +1598,33 @@ setInterval(() => {
   }
 }, 1000);
 
+function _setWebcamBtnState(text, { active = false, busy = false } = {}) {
+  if (!webcamToggleBtn) return;
+  webcamToggleBtn.disabled = busy;
+  webcamToggleBtn.innerText = text;
+  webcamToggleBtn.classList.toggle('active', active);
+}
+
 async function enableWebcamMode() {
   if (webcamMode) return;
-  if (webcamToggleBtn) { webcamToggleBtn.disabled = true; webcamToggleBtn.innerText = 'Requesting Camera...'; }
+  _setWebcamBtnState('Requesting Camera...', { busy: true });
 
   const isLocalHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if (!window.isSecureContext && !isLocalHost) {
     setLuxChip('Ambient: insecure context (use https/localhost)');
-    if (webcamToggleBtn) {
-      webcamToggleBtn.disabled = false;
-      webcamToggleBtn.innerText = 'Enable Webcam Mode';
-    }
+    _setWebcamBtnState('Enable Webcam Mode');
     return;
   }
 
   try {
-    await webcamSource.start();
+    await webcamSource.start({ previewElementId: 'main-webcam-preview-large' });
   } catch (e) {
     console.warn('[Main] Webcam start failed:', e?.message || e);
-    if (webcamToggleBtn) {
-      webcamToggleBtn.disabled = false;
-      webcamToggleBtn.innerText = 'Enable Webcam Mode';
-    }
+    _setWebcamBtnState('Enable Webcam Mode');
     setLuxChip('Ambient: camera denied');
     return;
   }
+  _setWebcamBtnState('Initialising gaze...', { busy: true, active: true });
 
   webcamMode = true;
   eyeTracker.disableMouse = true;
@@ -1432,25 +1645,45 @@ async function enableWebcamMode() {
     if (gazeLastError) {
       console.warn('[Main] Gaze tracker active with calibration warning:', gazeLastError);
     } else {
-      console.info('[Main] Gaze tracker backend active: mediapipe');
+      console.info(`[Main] Gaze tracker backend active: ${gazeBackend}`);
     }
   } catch (e) {
-    gazeTracker = null;
-    gazeLastError = formatBootError(e);
-    eyeTracker.clearGazeSample();
-    console.warn('[Main] mediapipe gaze backend failed:', gazeLastError);
+    const firstErr = formatBootError(e);
+    if (gazeBackend === 'openvino-bridge') {
+      console.warn('[Main] OpenVINO bridge failed, fallback to mediapipe:', firstErr);
+      gazeBackend = 'mediapipe';
+      localStorage.setItem('senseease_gaze_backend', gazeBackend);
+      setBackendButtonState();
+      try {
+        const started = await startMediaPipeGaze();
+        gazeTracker = started.tracker;
+        gazeLastError = `OpenVINO bridge unavailable; fallback to MediaPipe (${firstErr})`;
+      } catch (fallbackErr) {
+        gazeTracker = null;
+        gazeLastError = formatBootError(fallbackErr);
+        eyeTracker.clearGazeSample();
+      }
+    } else {
+      gazeTracker = null;
+      gazeLastError = firstErr;
+      eyeTracker.clearGazeSample();
+      console.warn('[Main] mediapipe gaze backend failed:', gazeLastError);
+    }
   }
 
   _ensureGazeDebugPanel();
   _updateGazeDebugPanel();
   setRecalibrateButtonState({ enabled: !!gazeTracker, busy: false });
   setDebugButtonState({ enabled: true });
+  if (markerToggleBtn) markerToggleBtn.style.display = '';
+  setBackendButtonState();
+  refreshBackendPill();
+  showGazeHint(!!gazeTracker && !gazeLastError);
 
-  if (webcamToggleBtn) {
-    webcamToggleBtn.disabled = false;
-    webcamToggleBtn.innerText = 'Disable Webcam Mode';
-    webcamToggleBtn.classList.add('active');
-  }
+  const tray = document.getElementById('main-webcam-tray');
+  if (tray) tray.style.display = '';
+
+  _setWebcamBtnState('Disable Webcam Mode', { active: true });
 }
 
 function disableWebcamMode() {
@@ -1474,18 +1707,36 @@ function disableWebcamMode() {
   _removeGazeDebugPanel();
   setRecalibrateButtonState({ enabled: false });
   setDebugButtonState({ enabled: false });
-  if (webcamToggleBtn) {
-    webcamToggleBtn.innerText = 'Enable Webcam Mode';
-    webcamToggleBtn.classList.remove('active');
-  }
+  if (markerToggleBtn) markerToggleBtn.style.display = 'none';
+  setBackendButtonState();
+  setBackendPill({ visible: false });
+  showGazeHint(false);
+  if (gazeLostEl) gazeLostEl.style.display = 'none';
+  const tray = document.getElementById('main-webcam-tray');
+  if (tray) tray.style.display = 'none';
+  _setWebcamBtnState('Enable Webcam Mode');
 }
 
 if (recalibrateBtn) {
-  recalibrateBtn.addEventListener('click', async () => {
+  recalibrateBtn.title = 'Click: 800ms drift fix · Shift+Click: full re-calibrate';
+  recalibrateBtn.addEventListener('click', async (ev) => {
     if (!gazeTracker || !webcamMode) return;
     setRecalibrateButtonState({ enabled: true, busy: true });
     try {
-      await gazeTracker.calibrate({ profile: 'quick', preCenterMs: 1600 });
+      // Plain click = micro (drift fix). Shift+Click = full quadratic remap.
+      // Most field issues are drift, so micro is the fast default.
+      if (ev.shiftKey) {
+        if (gazeBackend === 'openvino-bridge') {
+          await gazeTracker.calibrate({ preCenterMs: 1600 });
+        } else {
+          await gazeTracker.calibrate({ profile: 'quick', preCenterMs: 2600 });
+        }
+      } else if (typeof gazeTracker.microRecalibrate === 'function') {
+        await gazeTracker.microRecalibrate({ windowMs: 800 });
+      } else {
+        await gazeTracker.calibrate({ profile: 'quick', preCenterMs: 2600 });
+      }
+      eyeTracker.clearAiAssistBias();
       gazeCalibrated = true;
       gazeLastError = '';
     } catch (e) {
@@ -1501,6 +1752,76 @@ if (webcamToggleBtn) {
   webcamToggleBtn.addEventListener('click', () => {
     webcamMode ? disableWebcamMode() : enableWebcamMode();
   });
+}
+
+if (backendToggleBtn) {
+  setBackendButtonState();
+  backendToggleBtn.addEventListener('click', async () => {
+    const next = gazeBackend === 'mediapipe' ? 'openvino-bridge' : 'mediapipe';
+    gazeBackend = next;
+    localStorage.setItem('senseease_gaze_backend', gazeBackend);
+    setBackendButtonState();
+
+    if (!webcamMode) return;
+    disableWebcamMode();
+    gazeCalibrated = false;
+    await enableWebcamMode();
+  });
+}
+
+// Auto-probe the OpenVINO bridge. Lightweight (one WS open + close, ~1.5s
+// timeout). Surfaces availability so the user knows whether toggling
+// Backend will yield NPU acceleration. Re-runs every 12s while the page
+// is visible so users who start the server in a separate terminal *after*
+// loading the page see the hint update without refresh — clickable for
+// instant retry.
+let _bridgeAvailable = false;
+let _bridgeHumanLabel = null;
+
+function _formatBridgeHuman(hello) {
+  const dev = (hello.device || 'CPU').toUpperCase();
+  return hello.backend === 'openvino'
+    ? (dev === 'NPU' ? 'Intel NPU' : dev === 'GPU' ? 'Intel GPU (iGPU)' : `OpenVINO ${dev}`)
+    : (hello.backend === 'opencv' ? 'OpenCV (no AI accel)' : hello.backend || 'unknown');
+}
+
+async function probeBridge({ silent = false } = {}) {
+  if (typeof OpenVinoBridgeTracker?.probe !== 'function') return;
+  if (!silent) setBridgeHint('Probing OpenVINO bridge…');
+  try {
+    const hello = await OpenVinoBridgeTracker.probe('ws://127.0.0.1:8765', 1500);
+    _bridgeAvailable = true;
+    _bridgeHumanLabel = _formatBridgeHuman(hello);
+    if (gazeBackend === 'mediapipe') {
+      setBridgeHint(`✓ OpenVINO Bridge ready on ${_bridgeHumanLabel}. Click "Backend: OpenVINO Bridge" to switch.`);
+    } else {
+      setBridgeHint(`✓ OpenVINO Bridge live on ${_bridgeHumanLabel}.`);
+    }
+    console.info(`[Main] Bridge probe OK: backend=${hello.backend} device=${hello.device}`);
+  } catch (e) {
+    _bridgeAvailable = false;
+    _bridgeHumanLabel = null;
+    if (!silent) {
+      setBridgeHint('OpenVINO Bridge offline — using in-browser MediaPipe. Run tools/openvino_bridge_server.py for Intel NPU acceleration. (Click to retry)');
+    }
+  }
+}
+
+// Initial probe on page load.
+probeBridge();
+
+// Re-probe every 12s while the document is visible so the hint refreshes
+// when the user starts the bridge in a separate terminal post-load.
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  probeBridge({ silent: _bridgeAvailable });
+}, 12000);
+
+// Click the bridge hint to force a re-probe.
+if (bridgeHintEl) {
+  bridgeHintEl.style.cursor = 'pointer';
+  bridgeHintEl.title = 'Click to re-probe the OpenVINO bridge';
+  bridgeHintEl.addEventListener('click', () => probeBridge());
 }
 
 if (debugToggleBtn) {
@@ -1557,7 +1878,7 @@ function _updateGazeDebugPanel() {
 
   gazeDebugPanel.textContent = [
     '[Gaze Debug]',
-    'backend: mediapipe',
+    `backend: ${gazeBackend}`,
     `tracker: ${gazeTracker ? 'active' : 'none'}`,
     `load: ${trackerLoad}`,
     `mapping: ${mappingMode}`,

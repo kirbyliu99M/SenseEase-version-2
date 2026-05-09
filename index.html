@@ -179,16 +179,48 @@
               <p class="text-black text-sm opacity-60 mt-1">Three protection layers running concurrently: FOV restriction with Chang-Hain anchor grid (VIMS), progressive habituation expanding the clear field as you adapt, and ambient-light-driven circadian colour shifting (DES). Toggle Webcam Mode for on-device gaze + lux sensing.</p>
             </div>
             <div class="flex flex-col items-end gap-2">
+              <div id="main-backend-pill"
+                   class="senseease-backend-pill"
+                   data-state="idle"
+                   style="display:none;">
+                <span class="senseease-backend-dot"></span>
+                <span id="main-backend-pill-label">Backend: idle</span>
+                <span id="main-backend-pill-latency" class="senseease-backend-latency"></span>
+              </div>
               <div id="main-lux-chip" class="bg-white border border-[#024AD8] text-[#024AD8] text-[11px] font-bold px-2.5 py-1 rounded-full">Ambient: simulated</div>
+              <div id="main-color-temp" class="bg-white border border-[#F59E0B] text-[#92400E] text-[11px] font-bold px-2.5 py-1 rounded-full" title="Approximate display color temperature based on adaptive warmth">≈ 6500K</div>
             </div>
           </div>
 
           <!-- Webcam Mode controls -->
-          <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <div class="flex items-center gap-3 mb-2 flex-wrap">
             <button id="main-webcam-toggle" class="demo-toggle-btn text-xs py-1.5 px-4">Enable Webcam Mode</button>
+            <button id="main-backend-toggle" class="demo-toggle-btn text-xs py-1.5 px-4">Backend: MediaPipe</button>
             <button id="main-recalibrate-btn" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Recalibrate Gaze</button>
             <button id="main-debug-toggle" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Hide Debug</button>
+            <button id="main-marker-toggle" class="demo-toggle-btn text-xs py-1.5 px-4" style="display:none">Hide Gaze Marker</button>
             <span class="text-[11px] text-black opacity-50 leading-tight">Camera frames are processed on-device only. No data leaves your machine.</span>
+          </div>
+
+          <!-- Live status strip: bridge availability + gaze cue. Updated dynamically. -->
+          <div id="main-status-strip" class="text-[11px] mb-3 leading-tight" style="min-height:18px;">
+            <span id="main-bridge-hint" class="text-black opacity-55"></span>
+            <span id="main-gaze-hint" class="text-[#024AD8] font-bold" style="display:none;">◉ Gaze tracking active — your eyes steer the Chang-Hain clear-FOV zone in real time.</span>
+            <span id="main-gaze-lost" class="font-bold text-[#E54747]" style="display:none;">⚠ Gaze lost — please face the camera. Click <em>Recalibrate Gaze</em> if it doesn't recover.</span>
+          </div>
+
+          <!-- Webcam self-view tile + face-position guide. Visible only in webcam mode.
+               Bigger than the previous 80×60 thumbnail so the demo audience can
+               confirm their face is centred — that's the #1 cause of gaze drop-out. -->
+          <div id="main-webcam-tray" class="flex items-center gap-3 mb-3" style="display:none;">
+            <video id="main-webcam-preview-large" muted playsinline autoplay
+                   style="width:200px;height:150px;border-radius:10px;border:2px solid #024AD8;object-fit:cover;background:#0a0f1a;"></video>
+            <div class="text-[11px] leading-tight text-black opacity-70 max-w-xs">
+              <div class="font-bold mb-1">Position check</div>
+              Keep your face centred in this preview. Sit ~50 cm from the screen,
+              even lighting, glasses fine. Calibration runs once on first enable;
+              click <em>Recalibrate Gaze</em> any time to redo it.
+            </div>
           </div>
 
           <!-- Video container with circadian overlay layered on top -->

@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Python bytecode (from local OpenVINO bridge tooling)
+__pycache__/
+*.pyc
+
 # Large video files — hosted externally (Google Drive)
 *.mp4
 

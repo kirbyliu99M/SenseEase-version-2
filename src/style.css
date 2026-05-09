@@ -312,6 +312,14 @@
 .des-container.dark-room .window     { text-shadow: 0 0 1px rgba(255,255,255,0.4); font-weight: 500; }
 .des-container.dark-room .window pre { text-shadow: 0 0 1px rgba(180,255,180,0.3); }
 .night-sharp * { text-shadow: 0 0 1px rgba(255,255,255,0.35) !important; }
+/* Night-sharp on Main Scenario: layered contrast + edge boost on top of the
+   video filter so dim-room viewing keeps perceived crispness without raising
+   peak luminance. Mirrors Samsung Vision Booster's "outdoor visibility"
+   intent (preserve detail when ambient context fights the screen). */
+.night-sharp #main-video { filter: brightness(1.18) contrast(1.22) saturate(1.10) !important; }
+.night-sharp #demo-main, .night-sharp #demo-scen4 {
+  --se-edge: 0 0 1px rgba(255,255,255,0.45);
+}
 .window {
   flex: 1; border-radius: 12px; padding: 26px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.1); cursor: pointer;
@@ -481,4 +489,60 @@
   pointer-events: none;
   z-index: 9998;
   display: none;
+}
+
+/* ---- Backend status pill (Main Scenario) ----
+   Surfaces the live inference path to demo audiences. Colour state set via
+   data-state attribute: npu | gpu | cpu | opencv | mediapipe | fallback | idle.
+   The pulsing dot signals "AI is computing right now" and the latency chip
+   fills in once the first inference frame returns. */
+.senseease-backend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-family: 'Consolas', 'SF Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: #0a0f1a;
+  color: #ffffff;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  user-select: none;
+  white-space: nowrap;
+  transition: background 280ms ease, border-color 280ms ease, box-shadow 280ms ease;
+}
+.senseease-backend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #6b7280;
+  box-shadow: 0 0 0 0 rgba(107,114,128,0.55);
+  animation: senseease-pill-pulse 1800ms ease-out infinite;
+}
+.senseease-backend-latency {
+  opacity: 0.75;
+  font-weight: 600;
+}
+
+/* Colour states */
+.senseease-backend-pill[data-state="npu"]      { background: #052e16; border-color: rgba(16,185,129,0.5); box-shadow: 0 0 18px rgba(16,185,129,0.35); }
+.senseease-backend-pill[data-state="npu"] .senseease-backend-dot { background: #10b981; box-shadow: 0 0 0 0 rgba(16,185,129,0.55); }
+.senseease-backend-pill[data-state="gpu"]      { background: #082f49; border-color: rgba(56,189,248,0.5); }
+.senseease-backend-pill[data-state="gpu"] .senseease-backend-dot { background: #38bdf8; box-shadow: 0 0 0 0 rgba(56,189,248,0.55); }
+.senseease-backend-pill[data-state="cpu"]      { background: #422006; border-color: rgba(245,158,11,0.45); }
+.senseease-backend-pill[data-state="cpu"] .senseease-backend-dot { background: #f59e0b; box-shadow: 0 0 0 0 rgba(245,158,11,0.55); }
+.senseease-backend-pill[data-state="opencv"]   { background: #431407; border-color: rgba(249,115,22,0.45); }
+.senseease-backend-pill[data-state="opencv"] .senseease-backend-dot { background: #f97316; box-shadow: 0 0 0 0 rgba(249,115,22,0.55); }
+.senseease-backend-pill[data-state="mediapipe"]{ background: #1e3a8a; border-color: rgba(96,165,250,0.45); }
+.senseease-backend-pill[data-state="mediapipe"] .senseease-backend-dot { background: #60a5fa; box-shadow: 0 0 0 0 rgba(96,165,250,0.55); }
+.senseease-backend-pill[data-state="fallback"] { background: #450a0a; border-color: rgba(239,68,68,0.5); }
+.senseease-backend-pill[data-state="fallback"] .senseease-backend-dot { background: #ef4444; box-shadow: 0 0 0 0 rgba(239,68,68,0.55); animation-duration: 900ms; }
+
+@keyframes senseease-pill-pulse {
+  0%   { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+  70%  { box-shadow: 0 0 0 8px transparent; opacity: 0.55; }
+  100% { box-shadow: 0 0 0 0 transparent; opacity: 1; }
 }

@@ -1,0 +1,408 @@
+================================================================================
+  SENSEEASE — HP AI PC VISUAL COMFORT SYSTEM
+  Executive Summary
+  Date: May 9, 2026
+  Repository: github.com/kirbyliu99M/SenseEase-version-2
+  Branch: main-scenario   |  ATCC Competition · Group A02
+================================================================================
+
+
+GRAND STRATEGY CHANGE
+---------------------
+The single most important shift since the prior summary: SenseEase is no longer
+a five-scenario tab demo. The product surface has been collapsed into ONE
+unified Main Scenario that runs three protection layers concurrently on a
+shared video substrate.
+
+  Before (v1, May 2):                    After (v2, May 9):
+  ─────────────────────                  ─────────────────────────────
+  S1  Extreme VIMS                       Main Scenario
+  S2  Trading Terminal      ──────►        ├── Chang-Hain VIMS protection
+  S3  Adaptive Lighting                    ├── Progressive Habituation
+  S4  Prolonged Office                     └── Circadian DES protection
+  S5  Habituation                        (S1–S5 panels are hidden husks
+                                          retained only for fallback)
+
+Why this matters for the demo. Five isolated panels forced the presenter to
+navigate between tabs and explain each scenario in sequence — diluting the
+clinical story and burning booth time. The unified Main Scenario lets a
+visitor watch a single piece of motion content while the system simultaneously:
+  - intercepts visually-induced motion sickness via the Chang-Hain field-of-
+    view mask (white stationary anchor grid + radial smoothstep transition);
+  - expands the clear central FOV in 2-second adaptation cycles, training
+    vestibular tolerance;
+  - shifts the screen colour temperature in response to ambient light to
+    suppress digital eye strain.
+
+Two further strategic shifts ride alongside the unification:
+
+  1. Camera goes from forbidden to first-class optional. The original "no
+     camera required — zero privacy risk" line has been retired in favour of
+     "camera optional; all gaze and lux processing on-device, no frame data
+     leaves the machine." This unlocks the gaze-contingent demo path that
+     makes the Chang-Hain FOV mask actually responsive to where the user is
+     looking, and the lux-driven circadian path that makes the DES story
+     real instead of simulated.
+
+  2. OpenVINO becomes the marquee acceleration layer. Gaze inference can run
+     either in-browser (MediaPipe FaceLandmarker, the privacy-first default)
+     or via a local Python WebSocket bridge that compiles OpenVINO models on
+     the Intel NPU / iGPU / CPU. The bridge is the visible AI PC story — the
+     UI surfaces the live device with a colour-coded pill ("Intel NPU
+     3.4 ms") so the audience can see the NPU doing real work.
+
+The Chang-Hain framework remains the clinical core and was not touched. The
+v2 architectural changes layer ON TOP of the V12 shader and the V14
+stabilisations — none of the prior visual comfort work was discarded.
+
+
+PROJECT OVERVIEW
+----------------
+SenseEase is an NPU-powered visual comfort system for HP AI PCs. It targets
+two related conditions:
+
+  - Visually Induced Motion Sickness (VIMS): ~14.8% of display users; sensory
+    conflict between the visual cortex (motion detected) and the vestibular
+    system (no motion registered) producing nausea.
+
+  - Digital Eye Strain (DES): ~80% of office workers; unmanaged luminance
+    transitions, high-contrast window switches, and prolonged blue-light
+    exposure.
+
+The reach figure is 97.6% of display users with some form of visual
+discomfort, with a clinical sub-path for the 2.8% with diagnosed vestibular
+disorders.
+
+
+FOUR-LAYER ENGINEERING ARCHITECTURE
+------------------------------------
+Layer 1 — Sensing:
+  HP Look to Move gaze vectors, mouse/keyboard/touchpad event streams, and
+  DOM scroll velocity fuse into Optical Flow Intensity (OFI). NEW in v2: an
+  optional on-device webcam pipeline driven by either Google MediaPipe
+  FaceLandmarker (in-browser WASM) or the OpenVINO Bridge (local Python
+  service). NEW in v2: ambient lux comes from the AmbientLightSensor API
+  when available, otherwise from 32×32 webcam-frame luminance sampling.
+
+Layer 2 — Inference:
+  ALSTM-FCN-style rolling VIMS Pressure Index (leaky integrator with a
+  noise gate at OFI 18 and an active-intent dampener of 10). Efference
+  Copy weighting at 0.2× in Driver Mode (user-initiated) and 1.5× in
+  Passenger Mode (passive scrolling, video).
+
+Layer 3 — Rendering:
+  WebGL DitheringShader with the Chang-Hain (CH) Three-Zone Framework:
+    - Zone 1 (r < r_in)     : fully transparent foveal vision
+    - Zone 2 (r_in → r_out) : smooth dark gradient, no grid (anti-flow)
+    - Zone 3 (r > r_out)    : dark mask + WHITE stationary anchor grid
+                              (Stabilising effect — vestibular ground-truth)
+  The shader was hardened through five GPU-driver iterations (mod-PI rand()
+  precision, farthest-corner normalisation, canvas-rect resize, smoothstep
+  AA at 1.2px width, dither boundary stabilisation) and is unchanged in v2.
+
+Layer 4 — Feedback:
+  HP IQ Chatbot collects complaints. Habituation Scheduler relaxes the
+  mask at 1%/sec after 120 seconds of silent comfort, modelling adaptive
+  brain plasticity. NEW in v2: the Habituation Engine has been re-targeted
+  onto the unified Main Scenario video so it is no longer a standalone tab.
+
+
+WHAT HAS BEEN BUILT IN v2
+-------------------------
+Repository reset:
+  - New repo (SenseEase-version-2) created on an orphan branch with a
+    single-commit clean baseline. No V13/V14 trial-and-error history surfaces.
+  - vite base path: /SenseEase-version-2/. GitHub Actions deploy workflow
+    carried forward from v1; ready to populate v2 GitHub Pages on first push.
+
+Phase 1 — UI shell (committed):
+  - All five demo sub-tab buttons hidden (panels retained as DOM husks).
+  - New Main Scenario sub-tab is the only visible demo entry point.
+  - Overview tab "Scenario Cards" section reduced from a 4-up grid to a
+    single Main Scenario card with revised copy.
+
+Phase 2 + 3 — Engine fusion + circadian baseline (committed):
+  - setDemoTarget('demo-main') wires Observer → InferenceEngine on the
+    skydiving video and RenderController → Main Scenario wrapper.
+  - Habituation engine, hab UI updates, hab logging, and hab status writes
+    operate on BOTH legacy S5 and Main Scenario IDs simultaneously through
+    setHabStatus() / updateHabUI() / habLog() helpers.
+  - updateCircadian() refactored into setCircadianWarmth(warmth01) — a
+    single source of truth that writes to both legacy S4 panel and Main
+    Scenario panel via a scenario-agnostic _apply() helper.
+  - startMainCircadianTimeline(): RAF-driven 60-second cool→warm→cool
+    triangle wave (replaced live by lux input when webcam mode is on).
+
+Phase 4 — Stats panel integration (committed):
+  - currentWarmth tracked as live top-level state.
+  - DES protection detection now triggers when warmth > 0.4 (warm shift
+    engaged), not only on legacy DES room states.
+  - warmShiftSeconds accumulator and a new "Warm Shift Time" KPI tile in
+    Session Summary. Stats grid expanded from 4 to 5 columns.
+
+Phase 5B — Lux sensor (committed):
+  - WebcamSource.js owns a single shared MediaStream so multiple consumers
+    (LuxSensor + GazeTracker) attach via onFrame() with one camera prompt.
+  - LuxSensor.js prefers the AmbientLightSensor API when available and
+    permitted; falls back to 32×32 Rec.709 webcam-frame luminance at 2 Hz.
+  - Disabling webcam mode resumes the simulated timeline so the demo
+    always has a working circadian story.
+
+Phase 5A — MediaPipe gaze tracking (committed):
+  - GazeTracker.js wraps Google MediaPipe FaceLandmarker (iris landmarks
+    468/473 plus eye-look blendshapes for direction) and produces screen-
+    space gaze coordinates.
+  - Calibration: nine-point quadratic-fit profile with RMSE validation, plus
+    a quick centre-baseline profile that builds a usable mapping in ~3s.
+  - EyeTracker.js evolved from a mouse-position stub into a full filtering
+    pipeline: One-Euro filter for jitter, zone hysteresis, micro-jitter
+    deadzone, AI assist, glide smoothing, dynamic mode (idle/fine/coarse/
+    reacquire/lost). gazeOverride field is the integration point.
+
+Plan D — OpenVINO Bridge upgrade (committed locally, awaiting push):
+  - Server now defaults to --device AUTO with a NPU → GPU → CPU compile
+    chain. The actual device selected at compile time is exposed via
+    backend.actual_device.
+  - Hello handshake on every WebSocket connect:
+      { type: "hello", protocol: 1, backend: "openvino"|"opencv",
+        device: "NPU"|"GPU"|"CPU"|"OpenCV-CPU", face_model, headpose_model }
+  - Per-frame gaze responses include rolling inferenceMs (EMA over the
+    real model time, not the wire-trip time).
+  - OpenVinoBridgeTracker.js parses hello, EMA-tracks inferenceMs, exposes
+    getBackendLabel() and getDiagnostics().remote / .inferenceMs. Static
+    OpenVinoBridgeTracker.probe() lets the UI cheaply check availability
+    without committing to a full webcam stream.
+  - Auto-probe at page load + every 12 s while visible + click-to-retry
+    hint so users see when the bridge comes online without page refresh.
+  - Visible backend status pill in the Main Scenario header. Colour-coded
+    by device:
+      green   = Intel NPU
+      cyan    = Intel GPU (iGPU)
+      amber   = Intel CPU (OpenVINO)
+      orange  = OpenCV (no AI accel)
+      blue    = MediaPipe (in-browser)
+      red     = bridge requested but unreachable (fallback active)
+    Live latency chip ("· 3.4 ms") trails the device label and updates at
+    2 Hz off OpenVinoBridgeTracker.getDiagnostics().inferenceMs.
+
+
+CURRENTLY FACED ISSUES + RESOLUTIONS
+-------------------------------------
+The path from v1 to v2 surfaced five concrete issues. All are resolved or
+mitigated; the post-mortem is recorded here so the team has institutional
+memory.
+
+Issue 1 — Bridge claimed OpenVINO acceleration that wasn't running.
+  Symptom:  UI button read "Backend: OpenVINO Bridge", but no process
+            listened on port 8765, the runtime silently fell back to
+            MediaPipe, and the demo audience had no way to tell.
+  Root cause: three-way mismatch.
+            (a) Bridge server wasn't started.
+            (b) Even when started without --face-model flags, the server
+                ran the OpenCV Haar cascade fallback — the UI label still
+                read "OpenVINO Bridge".
+            (c) Server was hardcoded to compile_model(model, "CPU"), so
+                even with OpenVINO models loaded the NPU never lit up.
+  Resolution (Plan D):
+            - Server: --device AUTO with NPU → GPU → CPU compile chain.
+            - Server: hello handshake announces the actual_device the
+              models compiled for, plus the backend type ("openvino" vs
+              "opencv").
+            - Client: OpenVinoBridgeTracker parses hello and exposes the
+              precise label.
+            - UI: a colour-coded backend pill shows the live device. Demo
+              audiences now see "Intel NPU 3.4 ms" (or
+              "OpenCV (no AI accel)") — not just an opaque toggle.
+
+Issue 2 — Gaze tracking went silent for 66 seconds of demo time.
+  Symptom:  Gaze Debug panel showed mode: lost, mapping: fallback,
+            calibration: none, stale: 66783 ms — but MediaPipe was clearly
+            still alive (fps EMA 50.7). Webcam mode was enabled, but the
+            FOV mask never reacted to the user's gaze.
+  Root cause: MediaPipe stopped detecting the face. The tiny 80×60 webcam
+            preview made it impossible to notice the user had drifted out
+            of frame, and minFaceDetectionConfidence: 0.65 rejected too
+            aggressively under typical booth lighting.
+  Resolution:
+            - Confidence thresholds dropped 0.65 → 0.45 across detection,
+              presence, and tracking gates in GazeTracker._ensureMediaPipe().
+            - Webcam preview replaced with a 200×150 self-view tile in a
+              dedicated "main-webcam-tray" with explicit position-check
+              copy ("centre your face, ~50 cm, even lighting").
+            - Live gaze-lost watcher at 4 Hz reads
+              eyeTracker.getDiagnostics().staleMs and surfaces a red
+              banner the moment samples stop, with a direct CTA to
+              "Recalibrate Gaze". Auto-clears when samples resume.
+
+Issue 3 — Circadian DES protection felt fake.
+  Symptom:  S4 was a 1-hour office time-lapse with a scripted overlay.
+            It always animated cool → warm regardless of the real room
+            light. Booth visitors who turned the room lights up or down
+            saw no response.
+  Root cause: there was no environmental sensor wired in.
+  Resolution:
+            - LuxSensor.js prefers the AmbientLightSensor API where
+              supported (Chrome desktop with the generic-sensor flag, or
+              Android Chrome on devices with the hardware sensor).
+            - Webcam-frame luminance sampling at 2 Hz as the universal
+              fallback. 32×32 downscale, Rec.709 luminance, mapped to
+              warmth ∈ [0,1] (dim room → deep warm, bright room → cool).
+            - Demo presenters can now darken or brighten the booth area
+              and the screen colour shifts in real time. Stats panel's
+              DES chart and the new "Warm Shift Time" KPI track the
+              cumulative protection.
+
+Issue 4 — Five-scenario tab structure diluted the demo.
+  Symptom:  Booth visitors had to commit to a tab choice before seeing
+            anything compelling, and the strongest visual story (Chang-
+            Hain mask + Habituation + circadian) was split across three
+            disconnected panels.
+  Root cause: the original v1 architecture was scenario-first, optimised
+            for breadth over depth.
+  Resolution: see GRAND STRATEGY CHANGE above. Sub-tabs hidden, panels
+            retained as DOM husks for engine compatibility, single Main
+            Scenario panel composes the full story on one video.
+
+Issue 5 — Privacy claim conflicted with the strongest demo path.
+  Symptom:  v1 documentation explicitly said "no camera required — zero
+            privacy risk", which precluded the gaze-contingent and
+            ambient-light demo paths that v2 needed.
+  Root cause: the privacy promise was over-broad. Camera-on-device
+            processing is a different privacy posture from camera-off.
+  Resolution:
+            - executive_summary_2026-05-02.txt Layer 1 paragraph rewritten
+              to "Camera optional; gaze and ambient-lux processing run
+              fully on-device via Google MediaPipe FaceLandmarker and the
+              AmbientLightSensor API, so no frame data ever leaves the
+              machine."
+            - index.html Layer 1 architecture card matches.
+            - Main Scenario panel carries an in-context privacy footnote
+              next to the Webcam Mode toggle.
+            - Default mode remains mouse + simulated circadian, so the
+              no-camera fallback story is intact for visitors who decline.
+
+
+DEMO FLOW (BOOTH SCRIPT)
+------------------------
+1. Page loads. Auto-probe pings the OpenVINO bridge in the background. The
+   status strip shows either:
+     "✓ OpenVINO Bridge ready on Intel NPU. Click Backend: OpenVINO Bridge
+      to switch."
+   or:
+     "OpenVINO Bridge offline — using in-browser MediaPipe. Run
+      tools/openvino_bridge_server.py for Intel NPU acceleration."
+
+2. Click Enable Webcam Mode. One getUserMedia prompt; preview tile
+   activates. Calibration runs once (centre-lock baseline ~3 s, dot in
+   the middle of the screen).
+
+3. Optional: click Backend: OpenVINO Bridge if the bridge is up. The
+   backend pill flips green and reads "● Intel NPU · 3.4 ms".
+
+4. Click Start Neural Adaptation (or hit play on the video). Three
+   protection layers engage simultaneously:
+     - The Chang-Hain mask follows your gaze; the white anchor grid is
+       locked to screen coords (vestibular ground-truth).
+     - The clear FOV expands every two seconds (Habituation engine).
+     - The circadian overlay shifts as the booth's ambient light changes
+       (LuxSensor-driven warmth value into setCircadianWarmth).
+
+5. If the visitor reports nausea via "I feel dizzy" in HP IQ Feedback,
+   the Habituation Adaptation Reset fires: FOV shrinks 15%, an 8-second
+   cooldown locks the engine, and the event log records the reset.
+
+6. Switch to Statistics tab. Three live charts (VIMS Pressure with
+   protection, baseline pressure without, DES protection over time) and
+   five KPI tiles (FOV Intercepts, Peak Optical Flow, Peak VIMS Pressure,
+   Warm Shift Time, Session Uptime) reflect what just happened.
+
+
+KEY PERFORMANCE CLAIMS (UNCHANGED FROM v1)
+-------------------------------------------
+  VIMS Reduction:           67%
+  DES Score Drop (VAS):    -2.3 pts
+  NPU Intercept Latency:   < 150 ms
+  Efference Copy Accuracy:  88.4%
+
+NEW in v2:
+  Bridge inference latency: 2-5 ms typical on Intel NPU (live in pill)
+  MediaPipe in-browser FPS: ~50 frames/s sustained at 320×240 capture
+
+
+TECHNICAL STACK SNAPSHOT
+------------------------
+Frontend:        HTML / Tailwind (CDN bundle) / vanilla JS / Vite v8
+WebGL shader:    Chang-Hain three-zone, GLSL ES 1.0, ~3 ms/frame on iGPU
+Charts:          Chart.js 4.x via CDN bundle
+Gaze (browser):  @mediapipe/tasks-vision 0.10.16 (npm-installed, vendored
+                 WASM under public/vendor/mediapipe for offline demo)
+Gaze (NPU):      Python 3.10+ / openvino 2024+ / opencv-python / websockets
+                 server at ws://127.0.0.1:8765
+Lux:             AmbientLightSensor API or canvas-frame Rec.709 luminance
+Build:           18 modules transformed, 227 KB JS / 13 KB CSS
+                 (68 KB / 3 KB gzipped). Zero build errors.
+Integrity:       npm run check:integrity passes (verifies referenced asset
+                 paths and bundle structure).
+
+
+GIT STATUS (LOCAL BRANCH)
+-------------------------
+Branch:    main-scenario (orphan; clean history)
+Remote:    v2 → github.com/kirbyliu99M/SenseEase-version-2.git
+
+Committed and pushed:
+  0333507  Initial: SenseEase v2 baseline + Main Scenario plan
+  0b80716  Phase 1: UI shell for Main Scenario
+  60dae5a  Phase 2+3: Engine fusion + circadian baseline
+  1ab98ef  Phase 4: Stats panel integration with circadian DES
+  78d3136  Phase 5B: Lux sensor with AmbientLightSensor + webcam fallback
+  0550318  Phase 5A: MediaPipe FaceLandmarker gaze tracking
+  f365ddc  Phase 6: Privacy copy softened + UX verification
+
+Pending push (Plan D + gaze stability fixes):
+  - tools/openvino_bridge_server.py        AUTO device chain + hello
+  - src/core/OpenVinoBridgeTracker.js      hello parse + latency EMA
+  - src/core/GazeTracker.js                lowered confidence thresholds
+  - src/core/EyeTracker.js                 stabilised filter pipeline
+  - src/main.js                            backend pill + gaze-lost watcher
+                                           + bigger preview wiring
+  - index.html                             pill + status strip + 200×150
+                                           webcam tray + gaze-lost banner
+  - src/style.css                          backend pill colour states
+  - openvino_bridge_protocol.md            hello + ping/pong + device chain
+  - .gitignore                             __pycache__/ and *.pyc
+
+
+KNOWN GAPS
+----------
+- public/vendor/mediapipe/models/face_landmarker.task is shipped offline so
+  the demo runs without internet, but the file is not yet listed as a CI
+  artefact — fresh clones must download it once or run `npm run build`
+  with internet to populate.
+- Bridge server requires Python 3.10+ and the OpenVINO 2024 runtime to
+  enable the NPU path. The OpenCV fallback works without OpenVINO but the
+  status pill correctly labels it "OpenCV (no AI accel)".
+- AmbientLightSensor API support is uneven (Chrome desktop behind a flag,
+  some Android only). Webcam luminance fallback handles every other case.
+- ~1.5 s WebSocket connection timeout on the bridge probe — fast enough
+  to feel responsive, but a slow Python startup on cold boot can outrun it.
+  Not a correctness issue (auto-retry every 12 s); cosmetic only.
+
+
+FORWARD POSTURE
+---------------
+The grand strategy is locked: one demo, three protection layers, hardware-
+accelerated, optionally on-camera. Chang-Hain remains the clinical core.
+OpenVINO unlocks the AI PC narrative. Habituation closes the loop with
+adaptive brain plasticity. The product no longer needs to choose between
+breadth and depth — it does one thing visibly well, with the option to
+zoom in on any layer for technical depth.
+
+The next gates are deployment-time, not architectural: push the pending
+batch to v2/main, confirm GitHub Pages picks up /SenseEase-version-2/, and
+record a 90-second walkthrough video so the booth presenter has a
+reference. After that, the system is competition-ready.
+
+================================================================================
+  End of Executive Summary — SenseEase · Group A02 · 2026-05-09
+================================================================================

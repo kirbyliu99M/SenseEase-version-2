@@ -60,7 +60,9 @@ export class InferenceEngine {
       this.timeHistory.push(Number(t));
       this.flowHistory.push(parseFloat(flowForStats.toFixed(1)));
       this.pressureHistory.push(parseFloat(this.getPressure().toFixed(1)));
-      if (this.timeHistory.length > 120) {
+      // Cap history at 120s; shift() is O(n) but n is small. If we ever pile
+      // up due to a stalled tab, drain in bulk instead of one-shift-per-tick.
+      while (this.timeHistory.length > 120) {
         this.timeHistory.shift();
         this.flowHistory.shift();
         this.pressureHistory.shift();
@@ -113,7 +115,17 @@ export class InferenceEngine {
     const validFlow = this.sanitizeFlow(flow ?? 0);
     console.assert(Number.isFinite(validFlow), '[InferenceEngine] validFlow is not finite.');
     this.pressure = this.sanitizePressure(this.pressure);
-    const maskAttenuation = this.isMaskActive ? 0.2 : 1.0;
+
+    // A3-1 Dynamic mask attenuation by current mask radius.
+    //   Tight mask (strong protection) → drop flow harder (0.15)
+    //   Loose mask (gentle/early)      → ease attenuation (0.45)
+    // Replaces the previous hardcoded 0.2 which let pressure plateau.
+    let maskAttenuation = 1.0;
+    if (this.isMaskActive) {
+      const r = this.render?.currentRadiusInner ?? 130;
+      const tightness = Math.max(0, Math.min(1, (130 - r) / 105)); // 0=open, 1=tight
+      maskAttenuation = 0.45 - tightness * 0.30; // 0.45 → 0.15
+    }
     const effectiveFlow = validFlow * maskAttenuation;
     this.lastRawFlow = validFlow;
     this.lastEffectiveFlow = effectiveFlow;
@@ -123,13 +135,21 @@ export class InferenceEngine {
     }
     const strongEfference = !!meta.isUserActing || !!meta.strongEfference || !!hasIntent;
     const recoveryBias = this.isMaskActive ? 0.5 : 0.0;
+    // A3-3 Steeper recovery during strong efference — user is acting (Driver
+    // Mode), so the visual flow they're causing shouldn't accumulate. Faster
+    // decay than passive 0.98 reflects the efference-copy gating.
     if (strongEfference) {
-      const newPressure = (this.pressure * 0.98) - recoveryBias;
+      const efferenceDecay = 0.94;
+      const newPressure = (this.pressure * efferenceDecay) - recoveryBias;
       this.pressure = Number.isNaN(newPressure) ? 0 : this.sanitizePressure(newPressure);
       return;
     }
-    const baseWeight = this.passiveFlowWeight * 0.05;
-    const newPressure = (this.pressure * 0.98) + (effectiveFlow * baseWeight) - recoveryBias;
+    // A3-2 Flow-squared term — low flow keeps the v1 ramp, high flow (>60)
+    // accelerates so demo timeframes can actually reach threshold instead of
+    // taking ~70s on light passive flow.
+    const linearTerm = effectiveFlow * (this.passiveFlowWeight * 0.05);
+    const quadraticTerm = (effectiveFlow * effectiveFlow) * 0.0008;
+    const newPressure = (this.pressure * 0.98) + linearTerm + quadraticTerm - recoveryBias;
     this.pressure = Number.isNaN(newPressure) ? 0 : this.sanitizePressure(newPressure);
     if (this.protectionEnabled && (this.isGlobalOverrideOn || this.pressure >= this.threshold) && !this.isMaskActive) {
       this.triggerMask(directionX);

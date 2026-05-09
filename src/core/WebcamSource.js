@@ -59,7 +59,7 @@ export class WebcamSource {
   }
 
   stop() {
-    if (this._loopRaf) cancelAnimationFrame(this._loopRaf);
+    if (this._loopRaf) clearTimeout(this._loopRaf);
     this._loopRaf = null;
 
     if (this.stream) {
@@ -96,6 +96,11 @@ export class WebcamSource {
   }
 
   _startLoop() {
+    // setTimeout instead of requestAnimationFrame so MediaPipe inference (the
+    // heaviest subscriber) runs *between* paint frames rather than competing
+    // for the same RAF time-slot. This is the single biggest stutter fix when
+    // Webcam Mode is on: the video element paints first, gaze detection
+    // catches up afterwards.
     const tick = () => {
       const now = performance.now();
       for (const sub of this._subscribers) {
@@ -105,8 +110,8 @@ export class WebcamSource {
           catch (e) { console.error('[WebcamSource] subscriber error:', e); }
         }
       }
-      this._loopRaf = requestAnimationFrame(tick);
+      this._loopRaf = setTimeout(tick, 16);
     };
-    this._loopRaf = requestAnimationFrame(tick);
+    this._loopRaf = setTimeout(tick, 16);
   }
 }
