@@ -847,9 +847,10 @@ function initAmbientSensor() {
         lum /= (32 * 32);
         const lux = Math.round(lum / 255 * 2000);
         if (ambientLuxEl) ambientLuxEl.innerText = lux + ' lux';
-        // BenQ ScreenBar analog: auto-adjust brightness toward 500 lux target
+        // Samsung Adaptive Brightness: bright room → push brightness to compete
+        // with ambient glare; dim room → reduce brightness to prevent eye strain.
         if (desContainer && ambientMode === 'normal') {
-          const adj = lux < 200 ? 1.2 : lux > 800 ? 0.85 : 1.0;
+          const adj = lux < 200 ? 0.82 : lux > 800 ? 1.15 : 1.0;
           desContainer.style.filter = `brightness(${adj})`;
         }
       }, 500);
@@ -920,17 +921,17 @@ function setCircadianWarmth(warmth01) {
   const contrast = (1 - warmth01 * 0.05).toFixed(3);
   const filter = `sepia(${sepia}) hue-rotate(${hueRot}deg) brightness(${brightness}) contrast(${contrast})`;
 
-  // Main Scenario carries a stronger adaptive-visuals layer (v1 "BenQ
-  // ScreenBar analog" port + Samsung outdoor-visibility cue):
-  //   - dim room  → push brightness up to 1.20, contrast up to 1.18,
-  //                 saturate up to 1.10, plus night-sharp text-shadow
-  //   - bright room → drop brightness to 0.85 to fight glare, ease contrast
-  // The mid-band stays neutral so normal indoor lighting is unchanged.
-  const mainBrightness = (0.85 + (1 - warmth01) * 0.0 + warmth01 * 0.35).toFixed(3); // 0.85 → 1.20
-  const mainContrast   = (1.00 + warmth01 * 0.18).toFixed(3);
-  const mainSaturate   = (1.00 + warmth01 * 0.10).toFixed(3);
-  const mainSepia      = (warmth01 * 0.18).toFixed(3);
-  const mainHueRot     = Math.round(warmth01 * -8);
+  // Samsung-style Adaptive Brightness:
+  //   Bright room (warmth=0, high lux) → push brightness UP (compete with ambient glare)
+  //                                      + boost contrast & sharpness so detail is crisp
+  //   Dim room   (warmth=1, low lux)  → pull brightness DOWN (reduce eye strain)
+  //                                      + boost contrast to compensate for lost readability
+  //                                      + warm hue shift (reduce blue-light at night)
+  const mainBrightness = (1.15 - warmth01 * 0.35).toFixed(3); // 1.15 (bright) → 0.80 (dim)
+  const mainContrast   = (1.08 + warmth01 * 0.12).toFixed(3); // 1.08 (bright) → 1.20 (dim)
+  const mainSaturate   = (1.05 - warmth01 * 0.10).toFixed(3); // 1.05 (bright, vivid) → 0.95 (dim, muted)
+  const mainSepia      = (warmth01 * 0.18).toFixed(3);         // 0 (cool daylight) → 0.18 (warm night)
+  const mainHueRot     = Math.round(warmth01 * -8);            // slight warm shift in dim
   const mainFilter = `sepia(${mainSepia}) hue-rotate(${mainHueRot}deg) brightness(${mainBrightness}) contrast(${mainContrast}) saturate(${mainSaturate})`;
 
   function _apply(overlayId, badgeId, progressId, videoId) {
