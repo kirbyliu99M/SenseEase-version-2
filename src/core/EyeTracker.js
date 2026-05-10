@@ -42,7 +42,16 @@ export class EyeTracker {
     // further/longer it's been escaping, the faster it pulls.
     this._anchor = null;
     this._anchorEscapeMs = 0; // accumulated time gaze has been outside the leash
-    this.ANCHOR_RADIUS_PX = 90; // hold radius — ~1° visual angle at desk distance
+    // 50 px (~0.6° at desk distance) is the dead-zone for jitter rejection.
+    // 90 px previously made fixation visibly offset from real gaze — the
+    // "accuracy dropped" symptom from the field.
+    this.ANCHOR_RADIUS_PX = 50;
+    // Inside-leash slow-drift coefficient. Without this, the anchor literally
+    // freezes on jitter, but it also freezes on slow re-fixation drift, so
+    // staring at a point 30 px away from anchor leaves the mask 30 px off.
+    // A small inside-leash pull (0.012/frame) corrects fixation drift over
+    // ~1-2 s while still ignoring single-frame jitter.
+    this.ANCHOR_INSIDE_DRIFT = 0.012;
     this._aiAssist = {
       enabled: true,
       x: 0,
@@ -193,9 +202,13 @@ export class EyeTracker {
       // baseAlpha is scaled by quality so flickery low-quality samples
       // contribute less. The intent gate is gone; the output filter +
       // glide pass below already provide enough smoothing.
-      const distRatio = _clamp(distToOutput / 600, 0, 1);
-      const qualityScale = 0.6 + q * 0.4;
-      const outputAlpha = (0.022 + distRatio * distRatio * 0.30) * qualityScale;
+      // Base alpha 0.035 (was 0.022) trades a bit of idle smoothness for
+      // perceptibly lower latency on small movements — the anchor leash
+      // already absorbs jitter, so this filter doesn't have to do all
+      // the smoothing work.
+      const distRatio = _clamp(distToOutput / 500, 0, 1);
+      const qualityScale = 0.65 + q * 0.35;
+      const outputAlpha = (0.035 + distRatio * distRatio * 0.32) * qualityScale;
       this._intentTarget = null;
       this._intentSince = 0;
       this._output.x = _lerp(this._output.x, magneticX, outputAlpha);
@@ -208,10 +221,13 @@ export class EyeTracker {
     // that produced visible "judder" when crossing band boundaries during
     // smooth pursuit. Quadratic distance term keeps idle smooth (≈0.06)
     // while saccade-distance jumps reach 0.26 quickly.
+    // Glide alpha base bumped 0.06 → 0.09 for lower idle latency. The
+    // anchor's dead-zone catches steady-state jitter so this layer can
+    // be tuned for response, not smoothing.
     const glideDist = Math.hypot(aiOutput.x - this._glide.x, aiOutput.y - this._glide.y);
-    const glideRatio = _clamp(glideDist / 100, 0, 1);
-    const speedRatio2 = _clamp(speed / 800, 0, 1);
-    const glideAlpha = 0.06 + Math.max(glideRatio * glideRatio, speedRatio2) * 0.20;
+    const glideRatio = _clamp(glideDist / 90, 0, 1);
+    const speedRatio2 = _clamp(speed / 700, 0, 1);
+    const glideAlpha = 0.09 + Math.max(glideRatio * glideRatio, speedRatio2) * 0.24;
     this._glide.x = _lerp(this._glide.x, aiOutput.x, glideAlpha);
     this._glide.y = _lerp(this._glide.y, aiOutput.y, glideAlpha);
 
@@ -231,26 +247,35 @@ export class EyeTracker {
 
     if (anchorDist > this.ANCHOR_RADIUS_PX) {
       // Outside leash — accumulate escape time and pull anchor toward glide.
+      // Snappier than before (base 0.020 vs 0.014, ramp 0.18 vs 0.10) so
+      // saccades catch up faster while the dead-zone still rejects jitter.
       this._anchorEscapeMs += dtMs;
       const escapeDist = anchorDist - this.ANCHOR_RADIUS_PX;
-      // alpha grows with both (a) how far past the leash we are and
-      // (b) how long we've been past it. Capped so a sudden far jump
-      // doesn't snap; bounded so a slow drift still eventually catches up.
-      const distFactor = _clamp(escapeDist / 220, 0, 1);
-      const timeFactor = _clamp(this._anchorEscapeMs / 240, 0, 1);
-      const anchorAlpha = 0.014 + Math.max(distFactor * distFactor, timeFactor) * 0.10;
+      const distFactor = _clamp(escapeDist / 180, 0, 1);
+      const timeFactor = _clamp(this._anchorEscapeMs / 200, 0, 1);
+      const anchorAlpha = 0.020 + Math.max(distFactor * distFactor, timeFactor) * 0.18;
       this._anchor.x += anchorDx * anchorAlpha;
       this._anchor.y += anchorDy * anchorAlpha;
     } else {
-      // Inside leash — freeze anchor, decay escape timer so a brief
-      // excursion doesn't bias the next escape's alpha curve.
+      // Inside leash — slow drift toward live gaze. Single-frame jitter
+      // rounds out (0.012/frame ≈ 0.7 s half-life), but a sustained
+      // 30-px offset (real fixation drift) corrects within ~2 s. This
+      // is the fix for "calibration looks off" while preserving the
+      // anti-jitter behavior the leash was added for.
+      this._anchor.x += anchorDx * this.ANCHOR_INSIDE_DRIFT;
+      this._anchor.y += anchorDy * this.ANCHOR_INSIDE_DRIFT;
       this._anchorEscapeMs = Math.max(0, this._anchorEscapeMs - dtMs * 1.5);
     }
 
-    this.gazeOverride = {
-      x: _clamp(this._anchor.x, 0, window.innerWidth),
-      y: _clamp(this._anchor.y, 0, window.innerHeight),
-    };
+    // Hard-clamp anchor itself, not just the published gazeOverride. If a
+    // bad sample drove the anchor off-screen, leaving it negative would let
+    // RenderController compute a negative rect-local gaze and pin the mask
+    // to the demo bbox's top-left corner (the bug from the field). Clamping
+    // here keeps the leash + catch-up math working in valid territory.
+    this._anchor.x = _clamp(this._anchor.x, 0, window.innerWidth);
+    this._anchor.y = _clamp(this._anchor.y, 0, window.innerHeight);
+
+    this.gazeOverride = { x: this._anchor.x, y: this._anchor.y };
 
     this._raw = accepted;
     this._lastTs = now;

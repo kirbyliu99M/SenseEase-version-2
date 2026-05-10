@@ -99,63 +99,56 @@ export class GazeTracker {
 
     if (!result?.faceLandmarks?.[0]) return null;
 
+    const lm = result.faceLandmarks[0];
+    if (lm.length < RIGHT_IRIS_CENTRE + 1) return null;
+
+    // --- Quality: derive from blendshapes blink score if available ---
+    let quality = 0.55;
     if (result.faceBlendshapes?.[0]) {
       const shapes = result.faceBlendshapes[0].categories;
       const getScore = (name) => {
         const s = shapes.find((c) => c.categoryName === name);
         return s ? s.score : 0;
       };
-
-      const lOut = getScore('eyeLookOutLeft');
-      const lIn = getScore('eyeLookInLeft');
-      const rOut = getScore('eyeLookOutRight');
-      const rIn = getScore('eyeLookInRight');
-      const gazeX = ((rOut - rIn) + (lIn - lOut)) / 2.0;
-
-      const lUp = getScore('eyeLookUpLeft');
-      const lDn = getScore('eyeLookDownLeft');
-      const rUp = getScore('eyeLookUpRight');
-      const rDn = getScore('eyeLookDownRight');
-      const gazeY = ((lDn - lUp) + (rDn - rUp)) / 2.0;
-
       const blink = Math.max(getScore('eyeBlinkLeft'), getScore('eyeBlinkRight'));
-      const lookMagnitude = Math.hypot(gazeX, gazeY);
-      // Detection quality (eyelid openness) and gaze magnitude are different
-      // signals — the old formula conflated them, letting wide off-axis gaze
-      // inflate quality even on partially-occluded faces. Keep them separate
-      // and only let magnitude break ties when detection is already solid.
-      const detectionQuality = _clamp(1 - blink * 0.95, 0.0, 1.0);
-      const magnitudeBoost = detectionQuality > 0.6
-        ? Math.min(0.12, lookMagnitude * 0.28)
-        : 0;
-      const quality = _clamp(detectionQuality + magnitudeBoost, 0.08, 1.0);
-
-      return { x: gazeX, y: gazeY, quality };
+      quality = _clamp(1 - blink * 0.95, 0.08, 1.0);
     }
 
-    const lm = result.faceLandmarks[0];
-    if (lm.length < RIGHT_IRIS_CENTRE + 1) return null;
+    // --- Geometry: iris centers relative to eye socket ---
+    // Landmarks: 468/473 = iris centers, 133/362 = inner corners,
+    //            33/263 = outer corners. Per-eye width normalization
+    //            gives a physically grounded offset that the quadratic
+    //            calibration can map to screen coordinates reliably.
 
-    const lIris = lm[LEFT_IRIS_CENTRE];
-    const rIris = lm[RIGHT_IRIS_CENTRE];
-    const lInner = lm[133];
-    const rInner = lm[362];
+    const lIris  = lm[LEFT_IRIS_CENTRE];   // 468
+    const rIris  = lm[RIGHT_IRIS_CENTRE];  // 473
+    const lInner = lm[133];  // left eye inner corner
+    const lOuter = lm[33];   // left eye outer corner
+    const rInner = lm[362];  // right eye inner corner
+    const rOuter = lm[263];  // right eye outer corner
 
-    const faceCenter = {
-      x: (lInner.x + rInner.x) / 2,
-      y: (lInner.y + rInner.y) / 2,
-    };
+    // Per-eye horizontal center and width
+    const lEyeCx = (lInner.x + lOuter.x) / 2;
+    const lEyeW  = Math.abs(lInner.x - lOuter.x) || 0.001;
+    const rEyeCx = (rInner.x + rOuter.x) / 2;
+    const rEyeW  = Math.abs(rInner.x - rOuter.x) || 0.001;
+
+    // Horizontal gaze: iris offset from eye center, normalized by eye width.
+    // Negated because front-facing webcam landmarks are in image-space
+    // (mirrored relative to the user's screen perspective).
+    const lGazeX = (lIris.x - lEyeCx) / lEyeW;
+    const rGazeX = (rIris.x - rEyeCx) / rEyeW;
+    const gazeX  = -((lGazeX + rGazeX) / 2);
+
+    // Vertical gaze: use inter-ocular distance for normalization (eye
+    // height is too noisy from squinting). Average both eyes' iris Y
+    // relative to the face center Y.
+    const faceCenterY = (lInner.y + rInner.y) / 2;
     const iod = Math.hypot(lInner.x - rInner.x, lInner.y - rInner.y) || 0.001;
-    const avgIris = {
-      x: (lIris.x + rIris.x) / 2,
-      y: (lIris.y + rIris.y) / 2,
-    };
+    const avgIrisY = (lIris.y + rIris.y) / 2;
+    const gazeY = (avgIrisY - faceCenterY) / iod;
 
-    return {
-      x: (avgIris.x - faceCenter.x) / iod,
-      y: (avgIris.y - faceCenter.y) / iod,
-      quality: 0.55,
-    };
+    return { x: gazeX, y: gazeY, quality };
   }
 
   async start() {
@@ -297,9 +290,10 @@ export class GazeTracker {
   async microRecalibrate({ windowMs = 800 } = {}) {
     if (!this._isReady) return false;
     this._calibrating = true;
-    this._showCalibrationOverlay();
+    // No overlay — microRecalibrate is intentionally silent (called during
+    // theater mode toggle and button presses where interrupting the user
+    // with a full-screen overlay would be disruptive).
     const baseline = await this._collectCenterBaseline(windowMs);
-    this._dismissCalibrationOverlay();
     this._calibrating = false;
     if (!baseline) return false;
     this._fallbackCenter = { x: baseline.cx, y: baseline.cy, ready: true };
@@ -335,9 +329,15 @@ export class GazeTracker {
 
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
 
+    // Tight margin (-3% / +3%) — the previous 0..W exact clamp clipped
+    // legitimate corner predictions when the quadratic mapping naturally
+    // overshoots by a few percent. The -10% headroom from before was too
+    // wide and caused the corner-stick bug. -3% is the sweet spot: corner
+    // gazes still reach the actual corner; off-screen wandering is bounded
+    // by the EyeTracker anchor + RenderController center-pull downstream.
     return {
-      x: _clamp(x, -window.innerWidth * 0.10, window.innerWidth * 1.10),
-      y: _clamp(y, -window.innerHeight * 0.10, window.innerHeight * 1.10),
+      x: _clamp(x, -window.innerWidth * 0.03, window.innerWidth * 1.03),
+      y: _clamp(y, -window.innerHeight * 0.03, window.innerHeight * 1.03),
     };
   }
 

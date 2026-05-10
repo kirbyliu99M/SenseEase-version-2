@@ -158,35 +158,41 @@ export class RenderController {
 
         // Confine the *render position only* to the demo target bounds. The
         // upstream eyeTracker.gazeOverride must NOT be mutated here — it
-        // would leak our clamp back into the gaze pipeline and cause the
-        // "stuck on the edge" symptom: every subsequent frame would see gaze
-        // already at the edge and the mask would refuse to leave it.
-        // - Inside rect: pass through unchanged.
-        // - Slightly outside: clamp render position to nearest edge.
-        // - Far outside: fade intensity, but don't touch eyeTracker state.
+        // would leak our clamp back into the gaze pipeline.
+        //
+        // Three regimes:
+        // - Inside rect: pass through.
+        // - Slightly outside (within tolerance): clamp to nearest edge.
+        // - Far outside: snap to rect CENTER, not corner. The previous
+        //   edge-clamp pinned the mask to the rect's top-left corner when
+        //   gaze landed off-screen and habituation override forced
+        //   intensity = 1.0 (so the fade-out never won). Centering is the
+        //   sane fallback — keeps the mask visible and useful, doesn't lie
+        //   about where the user is looking.
         const overshootX = gazeX < 0 ? -gazeX : gazeX > rect.width ? gazeX - rect.width : 0;
         const overshootY = gazeY < 0 ? -gazeY : gazeY > rect.height ? gazeY - rect.height : 0;
         const overshoot = Math.max(overshootX, overshootY);
         const tolerancePx = Math.max(40, Math.min(rect.width, rect.height) * 0.18);
         let renderGazeX = gazeX;
         let renderGazeY = gazeY;
-        if (overshoot > 0) {
+        if (overshoot > tolerancePx) {
+          // Far overshoot — soft pull toward rect center. Lerp instead of
+          // hard-snap so a transient bad sample doesn't visibly jump the
+          // mask all the way to center; sustained overshoot will reach
+          // center over a few frames.
+          const cx = rect.width / 2;
+          const cy = rect.height / 2;
+          const pull = Math.min(1, Math.max(0, (overshoot - tolerancePx) / tolerancePx)) * 0.18;
+          const clampedX = Math.max(0, Math.min(rect.width, gazeX));
+          const clampedY = Math.max(0, Math.min(rect.height, gazeY));
+          renderGazeX = clampedX + (cx - clampedX) * pull;
+          renderGazeY = clampedY + (cy - clampedY) * pull;
+        } else if (overshoot > 0) {
           renderGazeX = Math.max(0, Math.min(rect.width, gazeX));
           renderGazeY = Math.max(0, Math.min(rect.height, gazeY));
         }
         gazeX = renderGazeX;
         gazeY = renderGazeY;
-        if (overshoot > tolerancePx) {
-          const fade = Math.max(0, 1 - (overshoot - tolerancePx) / tolerancePx);
-          this.currentIntensity *= fade;
-          if (this.currentIntensity <= HIDE_THRESHOLD) {
-            this.maskVisible = false;
-            if (this.shader && this.shader.isValid) this.shader.render(0, 0, 100, 100, 0);
-            this.forceHideMaskLayers();
-            requestAnimationFrame(renderLoop);
-            return;
-          }
-        }
 
         let targetRadiusInner = 130 - (currentFlow / 150) * 105;
         targetRadiusInner += this.userRadiusOffset;

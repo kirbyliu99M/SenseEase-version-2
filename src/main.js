@@ -1,4 +1,4 @@
-﻿import './style.css'
+import './style.css'
 import { SenseObserver }    from './core/SenseObserver.js'
 import { RenderController } from './core/RenderController.js'
 import { ChatbotUI }        from './components/ChatbotUI.js'
@@ -284,22 +284,47 @@ function exitTheater() {
 
 function refreshTheaterGazeBinding() {
   const activeDemo = document.querySelector('#demo-sub-tabs .demo-sub-btn.active')?.dataset.demo;
-  if (activeDemo) {
-    setTimeout(() => setDemoTarget(activeDemo), 60);
-    setTimeout(() => setDemoTarget(activeDemo), 180);
+
+  // Use ResizeObserver to wait for the CSS transition to finish settling
+  // the theater target's geometry, then rebind the demo target. This
+  // replaces the fragile setTimeout(60) + setTimeout(180) approach that
+  // raced against CSS transitions and grabbed stale BoundingClientRects.
+  const target = theaterTarget || getTheaterTarget();
+  if (target && activeDemo) {
+    let settled = false;
+    const ro = new ResizeObserver(() => {
+      if (settled) return;
+      settled = true;
+      ro.disconnect();
+      setDemoTarget(activeDemo);
+    });
+    ro.observe(target);
+    // Fallback: if ResizeObserver never fires (size unchanged), rebind after 250ms.
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        ro.disconnect();
+        setDemoTarget(activeDemo);
+      }
+    }, 250);
+  } else if (activeDemo) {
+    setDemoTarget(activeDemo);
   }
 
-  if (webcamMode && gazeTracker) {
+  // Silent micro-recalibrate (800ms drift fix, NO overlay, NO user interruption).
+  // The previous full calibrate() forced a 2.2s center-lock overlay every time
+  // the user toggled theater mode — terrible UX.
+  if (webcamMode && gazeTracker && typeof gazeTracker.microRecalibrate === 'function') {
     setTimeout(async () => {
       try {
-        await gazeTracker.calibrate({ profile: 'quick', preCenterMs: 2200 });
+        await gazeTracker.microRecalibrate({ windowMs: 800 });
         eyeTracker.clearAiAssistBias();
         gazeLastError = '';
       } catch (e) {
         gazeLastError = formatBootError(e);
       }
       _updateGazeDebugPanel();
-    }, 200);
+    }, 300);
   }
 }
 
@@ -521,6 +546,16 @@ function buildOrderBook() {
 
 function tickPrices() {
   const isDemo2Active = document.getElementById('demo-scen2')?.classList.contains('active');
+
+  // When S2 is hidden (Main Scenario active), only mutate price data silently.
+  // Skip ALL DOM reads/writes to free the main thread for MediaPipe inference.
+  if (!isDemo2Active) {
+    STOCK_DATA.forEach((s) => {
+      s.price = Math.max(s.price + (Math.random() - 0.495) * s.price * 0.003, 0.5);
+    });
+    return;
+  }
+
   STOCK_DATA.forEach((s, i) => {
     const oldPrice = s.price;
     s.price = Math.max(s.price + (Math.random() - 0.495) * s.price * 0.003, 0.5);
@@ -530,7 +565,7 @@ function tickPrices() {
     const chEl  = document.getElementById(`wl-chg-${i}`);
     if (prEl) {
       prEl.innerText = s.price.toFixed(2);
-      // Color-only tick feedback ??CSS transition handles smoothness, zero layout paint
+      // Color-only tick feedback — CSS transition handles smoothness, zero layout paint
       prEl.style.color = isUp ? '#ff6b6b' : '#4ade80';
       clearTimeout(prEl._t);
       prEl._t = setTimeout(() => { prEl.style.color = ''; }, 420);
@@ -573,7 +608,8 @@ if (watchlistEl) {
   // Architectural note: K-line canvas renders only when data changes (dirty flag).
   // Decouples canvas paint from the setInterval tick ??smooth 60fps, zero wasted GPU cycles.
   (function klineRenderLoop() {
-    if (klineDirty) { drawKLine(); klineDirty = false; }
+    const isDemo2Visible = document.getElementById('demo-scen2')?.classList.contains('active');
+    if (klineDirty && isDemo2Visible) { drawKLine(); klineDirty = false; }
     requestAnimationFrame(klineRenderLoop);
   })();
 }
